@@ -28,6 +28,10 @@
             background: rgba(255, 255, 255, 0.14);
             box-shadow: inset 0 0 20px rgba(0, 0, 0, 0.25);
             touch-action: none;
+            cursor: grab;
+        }
+        .joystick-base:active {
+            cursor: grabbing;
         }
         .joystick-knob {
             position: absolute;
@@ -229,10 +233,11 @@
 
         const joystickBase = document.getElementById('joystickBase');
         const joystickKnob = document.getElementById('joystickKnob');
-        const JOYSTICK_MAX_OFFSET = 36;
-        const touchJoystick = {
+        const JOYSTICK_MAX_OFFSET = 42;
+        const JOYSTICK_DEAD_PX = 6;
+        const joystickInput = {
             active: false,
-            touchId: null,
+            pointerId: null,
             vecX: 0,
             vecY: 0
         };
@@ -247,67 +252,108 @@
             const cy = rect.top + rect.height / 2;
             let dx = clientX - cx;
             let dy = clientY - cy;
-            const dist = Math.hypot(dx, dy);
-            if (dist > JOYSTICK_MAX_OFFSET && dist > 0) {
+            let dist = Math.hypot(dx, dy);
+            if (dist < JOYSTICK_DEAD_PX) {
+                setJoystickKnobVisual(0, 0);
+                joystickInput.vecX = 0;
+                joystickInput.vecY = 0;
+                return;
+            }
+            if (dist > JOYSTICK_MAX_OFFSET) {
                 const s = JOYSTICK_MAX_OFFSET / dist;
                 dx *= s;
                 dy *= s;
+                dist = JOYSTICK_MAX_OFFSET;
             }
             setJoystickKnobVisual(dx, dy);
-            touchJoystick.vecX = dx / JOYSTICK_MAX_OFFSET;
-            touchJoystick.vecY = dy / JOYSTICK_MAX_OFFSET;
+            const usable = JOYSTICK_MAX_OFFSET - JOYSTICK_DEAD_PX;
+            const mag = Math.min(1, (dist - JOYSTICK_DEAD_PX) / usable);
+            const inv = dist > 0 ? 1 / dist : 0;
+            joystickInput.vecX = dx * inv * mag;
+            joystickInput.vecY = dy * inv * mag;
         }
 
         function resetJoystick() {
-            touchJoystick.active = false;
-            touchJoystick.touchId = null;
-            touchJoystick.vecX = 0;
-            touchJoystick.vecY = 0;
+            const pid = joystickInput.pointerId;
+            joystickInput.active = false;
+            joystickInput.pointerId = null;
+            joystickInput.vecX = 0;
+            joystickInput.vecY = 0;
             setJoystickKnobVisual(0, 0);
-            document.removeEventListener('touchmove', onJoystickDocMove, docTouchOpts);
-            document.removeEventListener('touchend', onJoystickDocEnd, docTouchOpts);
-            document.removeEventListener('touchcancel', onJoystickDocEnd, docTouchOpts);
+            if (pid != null) {
+                try {
+                    joystickBase.releasePointerCapture(pid);
+                } catch (_) {}
+            }
         }
 
-        const docTouchOpts = { passive: false, capture: true };
-
-        function onJoystickDocMove(e) {
-            if (!touchJoystick.active) return;
+        joystickBase.addEventListener('pointerdown', (e) => {
             e.preventDefault();
-            for (let i = 0; i < e.changedTouches.length; i++) {
-                const t = e.changedTouches[i];
-                if (t.identifier === touchJoystick.touchId) {
+            if (joystickInput.active) resetJoystick();
+            joystickInput.active = true;
+            joystickInput.pointerId = e.pointerId;
+            try {
+                joystickBase.setPointerCapture(e.pointerId);
+            } catch (_) {}
+            updateJoystickFromClientXY(e.clientX, e.clientY);
+        });
+
+        joystickBase.addEventListener('pointermove', (e) => {
+            if (!joystickInput.active || e.pointerId !== joystickInput.pointerId) return;
+            e.preventDefault();
+            updateJoystickFromClientXY(e.clientX, e.clientY);
+        });
+
+        function onJoystickPointerEnd(e) {
+            if (!joystickInput.active || e.pointerId !== joystickInput.pointerId) return;
+            e.preventDefault();
+            resetJoystick();
+        }
+
+        joystickBase.addEventListener('pointerup', onJoystickPointerEnd);
+        joystickBase.addEventListener('pointercancel', onJoystickPointerEnd);
+
+        if (!('PointerEvent' in window)) {
+            let joyTouchId = null;
+            joystickBase.addEventListener(
+                'touchstart',
+                (e) => {
+                    e.preventDefault();
+                    const t = e.changedTouches[0];
+                    joyTouchId = t.identifier;
+                    joystickInput.active = true;
+                    joystickInput.pointerId = -1;
                     updateJoystickFromClientXY(t.clientX, t.clientY);
-                    break;
+                },
+                { passive: false }
+            );
+            document.addEventListener(
+                'touchmove',
+                (e) => {
+                    if (joyTouchId == null) return;
+                    e.preventDefault();
+                    for (let i = 0; i < e.touches.length; i++) {
+                        if (e.touches[i].identifier === joyTouchId) {
+                            updateJoystickFromClientXY(e.touches[i].clientX, e.touches[i].clientY);
+                            break;
+                        }
+                    }
+                },
+                { passive: false, capture: true }
+            );
+            const joyTouchEnd = (e) => {
+                if (joyTouchId == null) return;
+                for (let i = 0; i < e.changedTouches.length; i++) {
+                    if (e.changedTouches[i].identifier === joyTouchId) {
+                        joyTouchId = null;
+                        resetJoystick();
+                        break;
+                    }
                 }
-            }
+            };
+            document.addEventListener('touchend', joyTouchEnd, { passive: false, capture: true });
+            document.addEventListener('touchcancel', joyTouchEnd, { passive: false, capture: true });
         }
-
-        function onJoystickDocEnd(e) {
-            if (!touchJoystick.active) return;
-            for (let i = 0; i < e.changedTouches.length; i++) {
-                if (e.changedTouches[i].identifier === touchJoystick.touchId) {
-                    resetJoystick();
-                    break;
-                }
-            }
-        }
-
-        joystickBase.addEventListener(
-            'touchstart',
-            (e) => {
-                e.preventDefault();
-                if (touchJoystick.active) resetJoystick();
-                const t = e.changedTouches[0];
-                touchJoystick.active = true;
-                touchJoystick.touchId = t.identifier;
-                updateJoystickFromClientXY(t.clientX, t.clientY);
-                document.addEventListener('touchmove', onJoystickDocMove, docTouchOpts);
-                document.addEventListener('touchend', onJoystickDocEnd, docTouchOpts);
-                document.addEventListener('touchcancel', onJoystickDocEnd, docTouchOpts);
-            },
-            { passive: false }
-        );
 
         function tryMovePlayer(me, dx, dy) {
             const nx = me.x + dx;
@@ -317,6 +363,17 @@
             me.y = ny;
         }
 
+        function tryMovePlayerAxisSplit(me, mx, my) {
+            if (Math.abs(mx) < 1e-6 && Math.abs(my) < 1e-6) return;
+            if (Math.abs(mx) >= Math.abs(my)) {
+                tryMovePlayer(me, mx, 0);
+                tryMovePlayer(me, 0, my);
+            } else {
+                tryMovePlayer(me, 0, my);
+                tryMovePlayer(me, mx, 0);
+            }
+        }
+
         function update() {
             const me = players[socket.id];
             if (me) {
@@ -324,11 +381,13 @@
                     const step = me.isTagger ? BASE_MOVE_STEP * TAGGER_SPEED_MULT : BASE_MOVE_STEP;
                     const kx = (keys.d ? 1 : 0) - (keys.a ? 1 : 0);
                     const ky = (keys.s ? 1 : 0) - (keys.w ? 1 : 0);
-                    const tx = kx + touchJoystick.vecX;
-                    const ty = ky + touchJoystick.vecY;
+                    const tx = kx + joystickInput.vecX;
+                    const ty = ky + joystickInput.vecY;
                     const len = Math.hypot(tx, ty);
-                    if (len > 0.01) {
-                        tryMovePlayer(me, (tx / len) * step, (ty / len) * step);
+                    if (len > 0.04) {
+                        const mx = (tx / len) * step;
+                        const my = (ty / len) * step;
+                        tryMovePlayerAxisSplit(me, mx, my);
                     }
                 }
                 camera.x = me.x + PLAYER_W / 2 - canvas.width / 2;
