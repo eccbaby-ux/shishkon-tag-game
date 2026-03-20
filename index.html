@@ -9,71 +9,7 @@
             background: #333;
             touch-action: none;
         }
-        #ui { position: absolute; top: 10; left: 10; pointer-events: none; }
-        #joystick-root {
-            position: fixed;
-            left: 50%;
-            bottom: max(16px, env(safe-area-inset-bottom));
-            transform: translateX(-50%);
-            z-index: 20;
-            touch-action: none;
-            user-select: none;
-            -webkit-user-select: none;
-        }
-        .joystick-base {
-            position: relative;
-            width: 120px;
-            height: 120px;
-            border-radius: 50%;
-            background: rgba(255, 255, 255, 0.14);
-            box-shadow: inset 0 0 20px rgba(0, 0, 0, 0.25);
-            touch-action: none;
-            cursor: grab;
-        }
-        .joystick-base:active {
-            cursor: grabbing;
-        }
-        .joystick-knob {
-            position: absolute;
-            left: 50%;
-            top: 50%;
-            width: 52px;
-            height: 52px;
-            margin-left: -26px;
-            margin-top: -26px;
-            border-radius: 50%;
-            background: rgba(255, 255, 255, 0.32);
-            transform: translate(0px, 0px);
-            pointer-events: none;
-            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
-        }
-        #dashBtn {
-            position: fixed;
-            right: max(16px, env(safe-area-inset-right));
-            bottom: max(100px, calc(16px + env(safe-area-inset-bottom)));
-            z-index: 21;
-            width: 72px;
-            height: 72px;
-            padding: 0;
-            border: none;
-            border-radius: 50%;
-            font-size: 13px;
-            font-weight: bold;
-            color: #fff;
-            background: rgba(100, 180, 255, 0.55);
-            box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
-            touch-action: none;
-            user-select: none;
-            -webkit-user-select: none;
-            cursor: pointer;
-            transition: opacity 0.15s, background 0.15s;
-        }
-        #dashBtn.dash-cooldown {
-            opacity: 0.42;
-            background: rgba(80, 80, 90, 0.75);
-            cursor: default;
-            pointer-events: none;
-        }
+        #ui { position: absolute; top: 10; left: 10; pointer-events: none; z-index: 5; }
     </style>
 </head>
 <body>
@@ -82,11 +18,6 @@
         <p id="status">חפש מישהו לתפוס!</p>
     </div>
     <canvas id="gameCanvas"></canvas>
-    <div id="joystick-root" aria-hidden="true">
-        <div class="joystick-base" id="joystickBase">
-            <div class="joystick-knob" id="joystickKnob"></div>
-        </div>
-    </div>
 
     <script src="/socket.io/socket.io.js"></script>
     <script>
@@ -94,7 +25,6 @@
         const canvas = document.getElementById('gameCanvas');
         const ctx = canvas.getContext('2d');
         const timerEl = document.getElementById('timer');
-        const dashBtn = document.getElementById('dashBtn');
 
         const MAZE_BG = '#333';
         const WALL_COLOR = '#252525';
@@ -118,32 +48,9 @@
             dashCooldownUntil = now + DASH_COOLDOWN_MS;
         }
 
-        function updateDashButtonVisual() {
-            const now = performance.now();
-            const onCooldown = now < dashCooldownUntil;
-            dashBtn.classList.toggle('dash-cooldown', onCooldown);
-            if (onCooldown) {
-                const sec = Math.max(1, Math.ceil((dashCooldownUntil - now) / 1000));
-                dashBtn.textContent = String(sec);
-            } else {
-                dashBtn.textContent = 'Dash';
-            }
-        }
-
         window.addEventListener('keydown', (e) => {
             if (e.code !== 'Space' && e.key !== ' ') return;
             if (e.repeat) return;
-            e.preventDefault();
-            tryActivateDash();
-        });
-
-        function onDashButtonPress(e) {
-            e.preventDefault();
-            tryActivateDash();
-        }
-        dashBtn.addEventListener('touchstart', onDashButtonPress, { passive: false });
-        dashBtn.addEventListener('pointerdown', (e) => {
-            if (e.pointerType === 'touch') return;
             e.preventDefault();
             tryActivateDash();
         });
@@ -153,7 +60,6 @@
             canvas.height = window.innerHeight;
         }
         resizeCanvas();
-        window.addEventListener('resize', resizeCanvas);
 
         let players = {};
         let maze = null;
@@ -180,6 +86,7 @@
             for (const id in players) {
                 if (id === socket.id) continue;
                 const p = players[id];
+                if (!p || typeof p.x !== 'number' || typeof p.y !== 'number') continue;
                 let r = renderPosition[id];
                 if (!r) {
                     renderPosition[id] = { x: p.x, y: p.y };
@@ -304,137 +211,135 @@
         window.onkeydown = (e) => applyKey(e, true);
         window.onkeyup = (e) => applyKey(e, false);
 
-        const joystickBase = document.getElementById('joystickBase');
-        const joystickKnob = document.getElementById('joystickKnob');
-        const JOYSTICK_MAX_OFFSET = 42;
-        const JOYSTICK_DEAD_PX = 6;
-        const joystickInput = {
+        const touchMoveInput = { vecX: 0, vecY: 0 };
+        const floatJoy = {
             active: false,
-            pointerId: null,
-            vecX: 0,
-            vecY: 0
+            touchId: null,
+            centerX: 0,
+            centerY: 0,
+            knobDx: 0,
+            knobDy: 0,
+            baseRadius: 66,
+            maxKnobOffset: 46,
+            deadPx: 10
         };
 
-        function setJoystickKnobVisual(ox, oy) {
-            joystickKnob.style.transform = `translate(${ox}px, ${oy}px)`;
+        const joyDocOpts = { passive: false, capture: true };
+
+        function screenHalfX() {
+            return canvas.width * 0.5;
         }
 
-        function updateJoystickFromClientXY(clientX, clientY) {
-            const rect = joystickBase.getBoundingClientRect();
-            const cx = rect.left + rect.width / 2;
-            const cy = rect.top + rect.height / 2;
-            let dx = clientX - cx;
-            let dy = clientY - cy;
+        function detachFloatJoyDocumentListeners() {
+            document.removeEventListener('touchmove', onFloatJoyDocMove, joyDocOpts);
+            document.removeEventListener('touchend', onFloatJoyDocEnd, joyDocOpts);
+            document.removeEventListener('touchcancel', onFloatJoyDocEnd, joyDocOpts);
+        }
+
+        function resetFloatJoystick() {
+            floatJoy.active = false;
+            floatJoy.touchId = null;
+            floatJoy.knobDx = 0;
+            floatJoy.knobDy = 0;
+            touchMoveInput.vecX = 0;
+            touchMoveInput.vecY = 0;
+            detachFloatJoyDocumentListeners();
+        }
+
+        function updateFloatJoystickKnob(clientX, clientY) {
+            let dx = clientX - floatJoy.centerX;
+            let dy = clientY - floatJoy.centerY;
             let dist = Math.hypot(dx, dy);
-            if (dist < JOYSTICK_DEAD_PX) {
-                setJoystickKnobVisual(0, 0);
-                joystickInput.vecX = 0;
-                joystickInput.vecY = 0;
+            if (dist < floatJoy.deadPx) {
+                floatJoy.knobDx = 0;
+                floatJoy.knobDy = 0;
+                touchMoveInput.vecX = 0;
+                touchMoveInput.vecY = 0;
                 return;
             }
-            if (dist > JOYSTICK_MAX_OFFSET) {
-                const s = JOYSTICK_MAX_OFFSET / dist;
+            if (dist > floatJoy.maxKnobOffset) {
+                const s = floatJoy.maxKnobOffset / dist;
                 dx *= s;
                 dy *= s;
-                dist = JOYSTICK_MAX_OFFSET;
+                dist = floatJoy.maxKnobOffset;
             }
             if (Math.abs(dx) >= Math.abs(dy)) dy = 0;
             else dx = 0;
             const ax = Math.max(Math.abs(dx), Math.abs(dy));
-            if (ax < JOYSTICK_DEAD_PX) {
-                setJoystickKnobVisual(0, 0);
-                joystickInput.vecX = 0;
-                joystickInput.vecY = 0;
+            if (ax < floatJoy.deadPx) {
+                floatJoy.knobDx = 0;
+                floatJoy.knobDy = 0;
+                touchMoveInput.vecX = 0;
+                touchMoveInput.vecY = 0;
                 return;
             }
-            setJoystickKnobVisual(dx, dy);
-            const usable = JOYSTICK_MAX_OFFSET - JOYSTICK_DEAD_PX;
-            const mag = Math.min(1, (ax - JOYSTICK_DEAD_PX) / usable);
-            joystickInput.vecX = dx !== 0 ? Math.sign(dx) * mag : 0;
-            joystickInput.vecY = dy !== 0 ? Math.sign(dy) * mag : 0;
+            floatJoy.knobDx = dx;
+            floatJoy.knobDy = dy;
+            const usable = floatJoy.maxKnobOffset - floatJoy.deadPx;
+            const mag = Math.min(1, (ax - floatJoy.deadPx) / usable);
+            touchMoveInput.vecX = dx !== 0 ? Math.sign(dx) * mag : 0;
+            touchMoveInput.vecY = dy !== 0 ? Math.sign(dy) * mag : 0;
         }
 
-        function resetJoystick() {
-            const pid = joystickInput.pointerId;
-            joystickInput.active = false;
-            joystickInput.pointerId = null;
-            joystickInput.vecX = 0;
-            joystickInput.vecY = 0;
-            setJoystickKnobVisual(0, 0);
-            if (pid != null) {
-                try {
-                    joystickBase.releasePointerCapture(pid);
-                } catch (_) {}
+        function onFloatJoyDocMove(e) {
+            if (!floatJoy.active) return;
+            e.preventDefault();
+            for (let i = 0; i < e.touches.length; i++) {
+                const t = e.touches[i];
+                if (t.identifier === floatJoy.touchId) {
+                    updateFloatJoystickKnob(t.clientX, t.clientY);
+                    return;
+                }
             }
         }
 
-        joystickBase.addEventListener('pointerdown', (e) => {
-            e.preventDefault();
-            if (joystickInput.active) resetJoystick();
-            joystickInput.active = true;
-            joystickInput.pointerId = e.pointerId;
-            try {
-                joystickBase.setPointerCapture(e.pointerId);
-            } catch (_) {}
-            updateJoystickFromClientXY(e.clientX, e.clientY);
-        });
-
-        joystickBase.addEventListener('pointermove', (e) => {
-            if (!joystickInput.active || e.pointerId !== joystickInput.pointerId) return;
-            e.preventDefault();
-            updateJoystickFromClientXY(e.clientX, e.clientY);
-        });
-
-        function onJoystickPointerEnd(e) {
-            if (!joystickInput.active || e.pointerId !== joystickInput.pointerId) return;
-            e.preventDefault();
-            resetJoystick();
-        }
-
-        joystickBase.addEventListener('pointerup', onJoystickPointerEnd);
-        joystickBase.addEventListener('pointercancel', onJoystickPointerEnd);
-
-        if (!('PointerEvent' in window)) {
-            let joyTouchId = null;
-            joystickBase.addEventListener(
-                'touchstart',
-                (e) => {
+        function onFloatJoyDocEnd(e) {
+            if (!floatJoy.active) return;
+            for (let i = 0; i < e.changedTouches.length; i++) {
+                if (e.changedTouches[i].identifier === floatJoy.touchId) {
                     e.preventDefault();
-                    const t = e.changedTouches[0];
-                    joyTouchId = t.identifier;
-                    joystickInput.active = true;
-                    joystickInput.pointerId = -1;
-                    updateJoystickFromClientXY(t.clientX, t.clientY);
-                },
-                { passive: false }
-            );
-            document.addEventListener(
-                'touchmove',
-                (e) => {
-                    if (joyTouchId == null) return;
-                    e.preventDefault();
-                    for (let i = 0; i < e.touches.length; i++) {
-                        if (e.touches[i].identifier === joyTouchId) {
-                            updateJoystickFromClientXY(e.touches[i].clientX, e.touches[i].clientY);
-                            break;
-                        }
-                    }
-                },
-                { passive: false, capture: true }
-            );
-            const joyTouchEnd = (e) => {
-                if (joyTouchId == null) return;
-                for (let i = 0; i < e.changedTouches.length; i++) {
-                    if (e.changedTouches[i].identifier === joyTouchId) {
-                        joyTouchId = null;
-                        resetJoystick();
-                        break;
-                    }
+                    resetFloatJoystick();
+                    return;
                 }
-            };
-            document.addEventListener('touchend', joyTouchEnd, { passive: false, capture: true });
-            document.addEventListener('touchcancel', joyTouchEnd, { passive: false, capture: true });
+            }
         }
+
+        function startFloatJoystick(t) {
+            if (floatJoy.active) return;
+            floatJoy.active = true;
+            floatJoy.touchId = t.identifier;
+            floatJoy.centerX = t.clientX;
+            floatJoy.centerY = t.clientY;
+            document.addEventListener('touchmove', onFloatJoyDocMove, joyDocOpts);
+            document.addEventListener('touchend', onFloatJoyDocEnd, joyDocOpts);
+            document.addEventListener('touchcancel', onFloatJoyDocEnd, joyDocOpts);
+            updateFloatJoystickKnob(t.clientX, t.clientY);
+        }
+
+        function handleCanvasTouchStart(e) {
+            for (let i = 0; i < e.changedTouches.length; i++) {
+                const t = e.changedTouches[i];
+                if (t.clientX >= screenHalfX()) {
+                    e.preventDefault();
+                    tryActivateDash();
+                } else if (!floatJoy.active) {
+                    e.preventDefault();
+                    startFloatJoystick(t);
+                }
+            }
+        }
+
+        canvas.addEventListener('touchstart', handleCanvasTouchStart, { passive: false });
+
+        canvas.addEventListener('mousedown', (e) => {
+            if (e.button !== 0) return;
+            if (e.clientX >= screenHalfX()) tryActivateDash();
+        });
+
+        window.addEventListener('resize', () => {
+            resizeCanvas();
+            resetFloatJoystick();
+        });
 
         function tryMovePlayer(me, dx, dy) {
             const nx = me.x + dx;
@@ -469,36 +374,46 @@
         }
 
         function update() {
-            const me = players[socket.id];
-            if (me) {
-                if (maze) {
-                    const now = performance.now();
-                    const isDashing = now < dashUntil;
-                    const step = me.isTagger ? BASE_MOVE_STEP * TAGGER_SPEED_MULT : BASE_MOVE_STEP;
-                    const kx = (keys.d ? 1 : 0) - (keys.a ? 1 : 0);
-                    const ky = (keys.s ? 1 : 0) - (keys.w ? 1 : 0);
-                    const tx = kx + joystickInput.vecX;
-                    const ty = ky + joystickInput.vecY;
-                    let { dirX, dirY } = cardinalDirFromInput(tx, ty);
-                    if (dirX !== 0 || dirY !== 0) {
-                        lastMoveDirX = dirX;
-                        lastMoveDirY = dirY;
-                    } else if (isDashing && (lastMoveDirX !== 0 || lastMoveDirY !== 0)) {
-                        dirX = lastMoveDirX;
-                        dirY = lastMoveDirY;
+            try {
+                if (canvas.width < 2 || canvas.height < 2) resizeCanvas();
+                const me = players[socket.id];
+                if (me && typeof me.x === 'number' && typeof me.y === 'number') {
+                    if (maze) {
+                        const now = performance.now();
+                        const isDashing = now < dashUntil;
+                        const step = me.isTagger ? BASE_MOVE_STEP * TAGGER_SPEED_MULT : BASE_MOVE_STEP;
+                        const kx = (keys.d ? 1 : 0) - (keys.a ? 1 : 0);
+                        const ky = (keys.s ? 1 : 0) - (keys.w ? 1 : 0);
+                        const tx = kx + touchMoveInput.vecX;
+                        const ty = ky + touchMoveInput.vecY;
+                        let { dirX, dirY } = cardinalDirFromInput(tx, ty);
+                        if (dirX !== 0 || dirY !== 0) {
+                            lastMoveDirX = dirX;
+                            lastMoveDirY = dirY;
+                        } else if (isDashing && (lastMoveDirX !== 0 || lastMoveDirY !== 0)) {
+                            dirX = lastMoveDirX;
+                            dirY = lastMoveDirY;
+                        }
+                        const bursts = isDashing ? DASH_SPEED_MULT : 1;
+                        for (let b = 0; b < bursts; b++) {
+                            tryMoveCardinalWithSubsteps(me, dirX, dirY, step);
+                        }
                     }
-                    const bursts = isDashing ? DASH_SPEED_MULT : 1;
-                    for (let b = 0; b < bursts; b++) {
-                        tryMoveCardinalWithSubsteps(me, dirX, dirY, step);
+                    camera.x = me.x + PLAYER_W / 2 - canvas.width / 2;
+                    camera.y = me.y + PLAYER_H / 2 - canvas.height / 2;
+                    if (socket && socket.connected) {
+                        socket.emit('playerMovement', { x: me.x, y: me.y });
                     }
                 }
-                camera.x = me.x + PLAYER_W / 2 - canvas.width / 2;
-                camera.y = me.y + PLAYER_H / 2 - canvas.height / 2;
-                socket.emit('playerMovement', { x: me.x, y: me.y });
+                stepRenderPositionInterpolation();
+                draw();
+            } catch (err) {
+                console.error(err);
+                try {
+                    ctx.fillStyle = MAZE_BG;
+                    ctx.fillRect(0, 0, canvas.width || 300, canvas.height || 150);
+                } catch (_) {}
             }
-            stepRenderPositionInterpolation();
-            updateDashButtonVisual();
-            draw();
             requestAnimationFrame(update);
         }
 
@@ -509,7 +424,7 @@
             ctx.save();
             ctx.translate(-camera.x, -camera.y);
 
-            if (maze) {
+            if (maze && maze.length > 0 && maze[0] && maze[0].length > 0) {
                 const rows = maze.length;
                 const cols = maze[0].length;
                 const mw = cols * cellSize;
@@ -518,8 +433,10 @@
                 ctx.fillRect(0, 0, mw, mh);
                 ctx.fillStyle = WALL_COLOR;
                 for (let r = 0; r < rows; r++) {
+                    const row = maze[r];
+                    if (!row || row.length < cols) continue;
                     for (let c = 0; c < cols; c++) {
-                        if (maze[r][c] === 1) {
+                        if (row[c] === 1) {
                             ctx.fillRect(c * cellSize, r * cellSize, cellSize, cellSize);
                         }
                     }
@@ -527,6 +444,7 @@
             }
             for (let id in players) {
                 let p = players[id];
+                if (!p || typeof p.x !== 'number' || typeof p.y !== 'number') continue;
                 const { x: rx, y: ry } = getDrawPositionForPlayer(id, p);
                 ctx.fillStyle = p.isTagger ? 'red' : p.color;
                 ctx.fillRect(rx, ry, PLAYER_W, PLAYER_H);
@@ -537,7 +455,53 @@
             }
 
             ctx.restore();
+
+            drawFloatingJoystickHud();
         }
+
+        function drawFloatingJoystickHud() {
+            ctx.save();
+            try {
+                if (floatJoy.active) {
+                    const cx = floatJoy.centerX;
+                    const cy = floatJoy.centerY;
+                    const br = floatJoy.baseRadius;
+                    ctx.fillStyle = 'rgba(255, 255, 255, 0.14)';
+                    ctx.beginPath();
+                    ctx.arc(cx, cy, br, 0, Math.PI * 2);
+                    ctx.fill();
+                    ctx.strokeStyle = 'rgba(255, 255, 255, 0.22)';
+                    ctx.lineWidth = 2;
+                    ctx.stroke();
+                    ctx.fillStyle = 'rgba(255, 255, 255, 0.07)';
+                    ctx.beginPath();
+                    ctx.arc(cx, cy, floatJoy.deadPx, 0, Math.PI * 2);
+                    ctx.fill();
+                    const kx = cx + floatJoy.knobDx;
+                    const ky = cy + floatJoy.knobDy;
+                    ctx.fillStyle = 'rgba(255, 255, 255, 0.38)';
+                    ctx.beginPath();
+                    ctx.arc(kx, ky, 26, 0, Math.PI * 2);
+                    ctx.fill();
+                    ctx.strokeStyle = 'rgba(255, 255, 255, 0.35)';
+                    ctx.lineWidth = 2;
+                    ctx.stroke();
+                }
+
+                const now = performance.now();
+                if (now < dashCooldownUntil) {
+                    const sec = Math.max(1, Math.ceil((dashCooldownUntil - now) / 1000));
+                    ctx.font = 'bold 17px system-ui, -apple-system, sans-serif';
+                    ctx.fillStyle = 'rgba(200, 210, 230, 0.92)';
+                    ctx.textAlign = 'right';
+                    ctx.textBaseline = 'top';
+                    ctx.fillText(`Dash · ${sec}s`, canvas.width - 14, 12);
+                }
+            } finally {
+                ctx.restore();
+            }
+        }
+
         update();
     </script>
 </body>
