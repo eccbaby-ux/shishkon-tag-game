@@ -265,12 +265,20 @@
                 dy *= s;
                 dist = JOYSTICK_MAX_OFFSET;
             }
+            if (Math.abs(dx) >= Math.abs(dy)) dy = 0;
+            else dx = 0;
+            const ax = Math.max(Math.abs(dx), Math.abs(dy));
+            if (ax < JOYSTICK_DEAD_PX) {
+                setJoystickKnobVisual(0, 0);
+                joystickInput.vecX = 0;
+                joystickInput.vecY = 0;
+                return;
+            }
             setJoystickKnobVisual(dx, dy);
             const usable = JOYSTICK_MAX_OFFSET - JOYSTICK_DEAD_PX;
-            const mag = Math.min(1, (dist - JOYSTICK_DEAD_PX) / usable);
-            const inv = dist > 0 ? 1 / dist : 0;
-            joystickInput.vecX = dx * inv * mag;
-            joystickInput.vecY = dy * inv * mag;
+            const mag = Math.min(1, (ax - JOYSTICK_DEAD_PX) / usable);
+            joystickInput.vecX = dx !== 0 ? Math.sign(dx) * mag : 0;
+            joystickInput.vecY = dy !== 0 ? Math.sign(dy) * mag : 0;
         }
 
         function resetJoystick() {
@@ -358,19 +366,32 @@
         function tryMovePlayer(me, dx, dy) {
             const nx = me.x + dx;
             const ny = me.y + dy;
-            if (playerOverlapsWall(nx, ny, PLAYER_W, PLAYER_H)) return;
+            if (playerOverlapsWall(nx, ny, PLAYER_W, PLAYER_H)) return false;
             me.x = nx;
             me.y = ny;
+            return true;
         }
 
-        function tryMovePlayerAxisSplit(me, mx, my) {
-            if (Math.abs(mx) < 1e-6 && Math.abs(my) < 1e-6) return;
-            if (Math.abs(mx) >= Math.abs(my)) {
-                tryMovePlayer(me, mx, 0);
-                tryMovePlayer(me, 0, my);
+        const MOVE_INTENT = 0.15;
+
+        function cardinalDirFromInput(tx, ty) {
+            let dirX = 0;
+            let dirY = 0;
+            if (Math.abs(tx) < MOVE_INTENT && Math.abs(ty) < MOVE_INTENT) return { dirX: 0, dirY: 0 };
+            if (Math.abs(tx) >= Math.abs(ty)) {
+                if (tx > MOVE_INTENT) dirX = 1;
+                else if (tx < -MOVE_INTENT) dirX = -1;
             } else {
-                tryMovePlayer(me, 0, my);
-                tryMovePlayer(me, mx, 0);
+                if (ty > MOVE_INTENT) dirY = 1;
+                else if (ty < -MOVE_INTENT) dirY = -1;
+            }
+            return { dirX, dirY };
+        }
+
+        function tryMoveCardinalWithSubsteps(me, dirX, dirY, step) {
+            if (dirX === 0 && dirY === 0) return;
+            for (const f of [1, 0.62, 0.35]) {
+                if (tryMovePlayer(me, dirX * step * f, dirY * step * f)) return;
             }
         }
 
@@ -383,12 +404,8 @@
                     const ky = (keys.s ? 1 : 0) - (keys.w ? 1 : 0);
                     const tx = kx + joystickInput.vecX;
                     const ty = ky + joystickInput.vecY;
-                    const len = Math.hypot(tx, ty);
-                    if (len > 0.04) {
-                        const mx = (tx / len) * step;
-                        const my = (ty / len) * step;
-                        tryMovePlayerAxisSplit(me, mx, my);
-                    }
+                    const { dirX, dirY } = cardinalDirFromInput(tx, ty);
+                    tryMoveCardinalWithSubsteps(me, dirX, dirY, step);
                 }
                 camera.x = me.x + PLAYER_W / 2 - canvas.width / 2;
                 camera.y = me.y + PLAYER_H / 2 - canvas.height / 2;
