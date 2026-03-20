@@ -4,8 +4,45 @@
     <title>מבוך תופסת</title>
     <style>
         body { margin: 0; overflow: hidden; background: #222; color: white; font-family: sans-serif; }
-        canvas { display: block; background: #333; }
+        canvas {
+            display: block;
+            background: #333;
+            touch-action: none;
+        }
         #ui { position: absolute; top: 10; left: 10; pointer-events: none; }
+        #joystick-root {
+            position: fixed;
+            left: 50%;
+            bottom: max(16px, env(safe-area-inset-bottom));
+            transform: translateX(-50%);
+            z-index: 20;
+            touch-action: none;
+            user-select: none;
+            -webkit-user-select: none;
+        }
+        .joystick-base {
+            position: relative;
+            width: 120px;
+            height: 120px;
+            border-radius: 50%;
+            background: rgba(255, 255, 255, 0.14);
+            box-shadow: inset 0 0 20px rgba(0, 0, 0, 0.25);
+            touch-action: none;
+        }
+        .joystick-knob {
+            position: absolute;
+            left: 50%;
+            top: 50%;
+            width: 52px;
+            height: 52px;
+            margin-left: -26px;
+            margin-top: -26px;
+            border-radius: 50%;
+            background: rgba(255, 255, 255, 0.32);
+            transform: translate(0px, 0px);
+            pointer-events: none;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
+        }
     </style>
 </head>
 <body>
@@ -14,6 +51,11 @@
         <p id="status">חפש מישהו לתפוס!</p>
     </div>
     <canvas id="gameCanvas"></canvas>
+    <div id="joystick-root" aria-hidden="true">
+        <div class="joystick-base" id="joystickBase">
+            <div class="joystick-knob" id="joystickKnob"></div>
+        </div>
+    </div>
 
     <script src="/socket.io/socket.io.js"></script>
     <script>
@@ -185,6 +227,88 @@
         window.onkeydown = (e) => applyKey(e, true);
         window.onkeyup = (e) => applyKey(e, false);
 
+        const joystickBase = document.getElementById('joystickBase');
+        const joystickKnob = document.getElementById('joystickKnob');
+        const JOYSTICK_MAX_OFFSET = 36;
+        const touchJoystick = {
+            active: false,
+            touchId: null,
+            vecX: 0,
+            vecY: 0
+        };
+
+        function setJoystickKnobVisual(ox, oy) {
+            joystickKnob.style.transform = `translate(${ox}px, ${oy}px)`;
+        }
+
+        function updateJoystickFromClientXY(clientX, clientY) {
+            const rect = joystickBase.getBoundingClientRect();
+            const cx = rect.left + rect.width / 2;
+            const cy = rect.top + rect.height / 2;
+            let dx = clientX - cx;
+            let dy = clientY - cy;
+            const dist = Math.hypot(dx, dy);
+            if (dist > JOYSTICK_MAX_OFFSET && dist > 0) {
+                const s = JOYSTICK_MAX_OFFSET / dist;
+                dx *= s;
+                dy *= s;
+            }
+            setJoystickKnobVisual(dx, dy);
+            touchJoystick.vecX = dx / JOYSTICK_MAX_OFFSET;
+            touchJoystick.vecY = dy / JOYSTICK_MAX_OFFSET;
+        }
+
+        function resetJoystick() {
+            touchJoystick.active = false;
+            touchJoystick.touchId = null;
+            touchJoystick.vecX = 0;
+            touchJoystick.vecY = 0;
+            setJoystickKnobVisual(0, 0);
+            document.removeEventListener('touchmove', onJoystickDocMove, docTouchOpts);
+            document.removeEventListener('touchend', onJoystickDocEnd, docTouchOpts);
+            document.removeEventListener('touchcancel', onJoystickDocEnd, docTouchOpts);
+        }
+
+        const docTouchOpts = { passive: false, capture: true };
+
+        function onJoystickDocMove(e) {
+            if (!touchJoystick.active) return;
+            e.preventDefault();
+            for (let i = 0; i < e.changedTouches.length; i++) {
+                const t = e.changedTouches[i];
+                if (t.identifier === touchJoystick.touchId) {
+                    updateJoystickFromClientXY(t.clientX, t.clientY);
+                    break;
+                }
+            }
+        }
+
+        function onJoystickDocEnd(e) {
+            if (!touchJoystick.active) return;
+            for (let i = 0; i < e.changedTouches.length; i++) {
+                if (e.changedTouches[i].identifier === touchJoystick.touchId) {
+                    resetJoystick();
+                    break;
+                }
+            }
+        }
+
+        joystickBase.addEventListener(
+            'touchstart',
+            (e) => {
+                e.preventDefault();
+                if (touchJoystick.active) resetJoystick();
+                const t = e.changedTouches[0];
+                touchJoystick.active = true;
+                touchJoystick.touchId = t.identifier;
+                updateJoystickFromClientXY(t.clientX, t.clientY);
+                document.addEventListener('touchmove', onJoystickDocMove, docTouchOpts);
+                document.addEventListener('touchend', onJoystickDocEnd, docTouchOpts);
+                document.addEventListener('touchcancel', onJoystickDocEnd, docTouchOpts);
+            },
+            { passive: false }
+        );
+
         function tryMovePlayer(me, dx, dy) {
             const nx = me.x + dx;
             const ny = me.y + dy;
@@ -198,10 +322,14 @@
             if (me) {
                 if (maze) {
                     const step = me.isTagger ? BASE_MOVE_STEP * TAGGER_SPEED_MULT : BASE_MOVE_STEP;
-                    if (keys.w) tryMovePlayer(me, 0, -step);
-                    if (keys.s) tryMovePlayer(me, 0, step);
-                    if (keys.a) tryMovePlayer(me, -step, 0);
-                    if (keys.d) tryMovePlayer(me, step, 0);
+                    const kx = (keys.d ? 1 : 0) - (keys.a ? 1 : 0);
+                    const ky = (keys.s ? 1 : 0) - (keys.w ? 1 : 0);
+                    const tx = kx + touchJoystick.vecX;
+                    const ty = ky + touchJoystick.vecY;
+                    const len = Math.hypot(tx, ty);
+                    if (len > 0.01) {
+                        tryMovePlayer(me, (tx / len) * step, (ty / len) * step);
+                    }
                 }
                 camera.x = me.x + PLAYER_W / 2 - canvas.width / 2;
                 camera.y = me.y + PLAYER_H / 2 - canvas.height / 2;
