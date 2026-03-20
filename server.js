@@ -12,10 +12,11 @@ app.get('/', (req, res) => {
 });
 app.use(express.static('.'));
 
-const MAZE_SIZE = 50;
+const MAZE_SIZE = 30;
 const CELL_SIZE = 52;
 const PLAYER_W = 30;
 const PLAYER_H = 30;
+const ROUND_SECONDS = 60;
 
 function shuffleInPlace(arr) {
     for (let i = arr.length - 1; i > 0; i--) {
@@ -79,7 +80,7 @@ function generateMaze() {
     return maze;
 }
 
-const maze = generateMaze();
+let maze = generateMaze();
 
 function touchesWall(x, y, w, h) {
     const c0 = Math.floor(x / CELL_SIZE);
@@ -96,40 +97,74 @@ function touchesWall(x, y, w, h) {
     return false;
 }
 
-function randomOpenSpawn() {
-    const open = [];
+function findValidSpawnPoint() {
+    const pathCells = [];
     for (let r = 0; r < MAZE_SIZE; r++) {
         for (let c = 0; c < MAZE_SIZE; c++) {
-            if (maze[r][c] === 0) {
-                const x = c * CELL_SIZE + (CELL_SIZE - PLAYER_W) / 2;
-                const y = r * CELL_SIZE + (CELL_SIZE - PLAYER_H) / 2;
-                if (!touchesWall(x, y, PLAYER_W, PLAYER_H)) {
-                    open.push({ x, y });
-                }
-            }
+            if (maze[r][c] === 0) pathCells.push({ r, c });
         }
     }
-    return open[Math.floor(Math.random() * open.length)];
+    const pick =
+        pathCells.length === 0
+            ? { r: 1, c: 1 }
+            : pathCells[Math.floor(Math.random() * pathCells.length)];
+    return {
+        x: pick.c * CELL_SIZE + (CELL_SIZE - PLAYER_W) / 2,
+        y: pick.r * CELL_SIZE + (CELL_SIZE - PLAYER_H) / 2
+    };
 }
 
 let players = {};
-let gameTimer = 300;
+let gameTimer = ROUND_SECONDS;
 let taggerId = null;
+let roundActive = true;
 
-// לוגיקת טיימר
+function resetGame() {
+    maze = generateMaze();
+    gameTimer = ROUND_SECONDS;
+    const ids = Object.keys(players);
+    for (const id of ids) {
+        const pos = findValidSpawnPoint();
+        players[id].x = pos.x;
+        players[id].y = pos.y;
+        players[id].isTagger = false;
+    }
+    if (ids.length > 0) {
+        const tagger = ids[Math.floor(Math.random() * ids.length)];
+        players[tagger].isTagger = true;
+        taggerId = tagger;
+    } else {
+        taggerId = null;
+    }
+    io.emit('gameReset', {
+        maze,
+        cellSize: CELL_SIZE,
+        size: MAZE_SIZE,
+        players,
+        timer: gameTimer
+    });
+}
+
 setInterval(() => {
+    if (!roundActive) return;
     if (gameTimer > 0 && Object.keys(players).length > 0) {
         gameTimer--;
         io.emit('timerUpdate', gameTimer);
-    } else if (gameTimer === 0) {
-        io.emit('gameOver', taggerId);
+        if (gameTimer === 0) {
+            roundActive = false;
+            io.emit('gameOver', taggerId);
+            setTimeout(() => {
+                resetGame();
+                roundActive = true;
+            }, 5000);
+        }
     }
 }, 1000);
 
 io.on('connection', (socket) => {
     console.log('שחקן התחבר:', socket.id);
 
-    const spawn = randomOpenSpawn();
+    const spawn = findValidSpawnPoint();
     players[socket.id] = {
         x: spawn.x,
         y: spawn.y,
@@ -187,8 +222,21 @@ io.on('connection', (socket) => {
     });
 
     socket.on('disconnect', () => {
+        const wasTagger = taggerId === socket.id;
         delete players[socket.id];
         io.emit('playerDisconnected', socket.id);
+        if (wasTagger) {
+            const ids = Object.keys(players);
+            if (ids.length > 0) {
+                for (const id of ids) players[id].isTagger = false;
+                const next = ids[Math.floor(Math.random() * ids.length)];
+                players[next].isTagger = true;
+                taggerId = next;
+                io.emit('currentPlayers', players);
+            } else {
+                taggerId = null;
+            }
+        }
     });
 });
 

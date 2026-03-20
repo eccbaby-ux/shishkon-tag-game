@@ -1,9 +1,254 @@
 <!DOCTYPE html>
-<html lang="he">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>SHISHKON</title>
-  </head>
-  <body></body>
+<html>
+<head>
+    <title>מבוך תופסת</title>
+    <style>
+        body { margin: 0; overflow: hidden; background: #222; color: white; font-family: sans-serif; }
+        canvas { display: block; background: #333; }
+        #ui { position: absolute; top: 10; left: 10; pointer-events: none; }
+    </style>
+</head>
+<body>
+    <div id="ui">
+        <h1 id="timer">1:00</h1>
+        <p id="status">חפש מישהו לתפוס!</p>
+    </div>
+    <canvas id="gameCanvas"></canvas>
+
+    <script src="/socket.io/socket.io.js"></script>
+    <script>
+        const socket = io();
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+        const timerEl = document.getElementById('timer');
+
+        const MAZE_BG = '#333';
+        const WALL_COLOR = '#252525';
+        const PLAYER_W = 30;
+        const PLAYER_H = 30;
+        const BASE_MOVE_STEP = 6;
+        const TAGGER_SPEED_MULT = 1.1;
+
+        function resizeCanvas() {
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+        }
+        resizeCanvas();
+        window.addEventListener('resize', resizeCanvas);
+
+        let players = {};
+        let maze = null;
+        let cellSize = 52;
+        const camera = { x: 0, y: 0 };
+        const renderPosition = {};
+        let lastInterpTime = performance.now();
+        const INTERP_SMOOTH_HZ = 14;
+        const INTERP_SNAP_PX = 150;
+        const INTERP_SNAP_EPS = 0.2;
+
+        function pruneRenderPosition() {
+            for (const id in renderPosition) {
+                if (!players[id]) delete renderPosition[id];
+            }
+        }
+
+        function stepRenderPositionInterpolation() {
+            const now = performance.now();
+            const dt = Math.min((now - lastInterpTime) / 1000, 0.1);
+            lastInterpTime = now;
+            const k = 1 - Math.exp(-INTERP_SMOOTH_HZ * dt);
+
+            for (const id in players) {
+                if (id === socket.id) continue;
+                const p = players[id];
+                let r = renderPosition[id];
+                if (!r) {
+                    renderPosition[id] = { x: p.x, y: p.y };
+                    continue;
+                }
+                const dx = p.x - r.x;
+                const dy = p.y - r.y;
+                const dist = Math.hypot(dx, dy);
+                if (dist > INTERP_SNAP_PX) {
+                    r.x = p.x;
+                    r.y = p.y;
+                    continue;
+                }
+                r.x += dx * k;
+                r.y += dy * k;
+                if (Math.hypot(p.x - r.x, p.y - r.y) < INTERP_SNAP_EPS) {
+                    r.x = p.x;
+                    r.y = p.y;
+                }
+            }
+        }
+
+        function getDrawPositionForPlayer(id, p) {
+            if (id === socket.id) return { x: p.x, y: p.y };
+            const r = renderPosition[id];
+            return r ? { x: r.x, y: r.y } : { x: p.x, y: p.y };
+        }
+
+        socket.on('mazeData', (data) => {
+            maze = data.maze;
+            cellSize = data.cellSize;
+            for (const id in renderPosition) delete renderPosition[id];
+        });
+
+        function playerOverlapsWall(x, y, w, h) {
+            if (!maze || !maze.length || !maze[0].length) return false;
+            const rows = maze.length;
+            const cols = maze[0].length;
+            const c0 = Math.floor(x / cellSize);
+            const c1 = Math.floor((x + w - 1) / cellSize);
+            const r0 = Math.floor(y / cellSize);
+            const r1 = Math.floor((y + h - 1) / cellSize);
+            for (let r = r0; r <= r1; r++) {
+                for (let c = c0; c <= c1; c++) {
+                    if (r < 0 || r >= rows || c < 0 || c >= cols || maze[r][c] === 1) {
+                        return true;
+                    }
+                }
+            }
+            return false;
+        }
+        socket.on('positionCorrection', (pos) => {
+            if (players[socket.id]) {
+                players[socket.id].x = pos.x;
+                players[socket.id].y = pos.y;
+            }
+        });
+        socket.on('currentPlayers', (serverPlayers) => {
+            players = serverPlayers;
+            pruneRenderPosition();
+            for (const id in players) {
+                if (id === socket.id) continue;
+                const p = players[id];
+                if (!renderPosition[id]) renderPosition[id] = { x: p.x, y: p.y };
+            }
+        });
+        socket.on('gameReset', (data) => {
+            maze = data.maze;
+            cellSize = data.cellSize;
+            players = data.players;
+            for (const id in renderPosition) delete renderPosition[id];
+            for (const id in players) {
+                if (id === socket.id) continue;
+                const p = players[id];
+                renderPosition[id] = { x: p.x, y: p.y };
+            }
+            timerEl.innerText = formatSecondsAsMMSS(data.timer);
+        });
+        socket.on('playerMoved', (p) => { players[p.id] = p; });
+        function formatSecondsAsMMSS(totalSeconds) {
+            const sec = Math.max(0, Math.floor(Number(totalSeconds) || 0));
+            const m = Math.floor(sec / 60);
+            const s = sec % 60;
+            return `${m}:${String(s).padStart(2, '0')}`;
+        }
+        socket.on('timerUpdate', (t) => { timerEl.innerText = formatSecondsAsMMSS(t); });
+        socket.on('playerDisconnected', (id) => {
+            delete players[id];
+            delete renderPosition[id];
+        });
+        socket.on('gameOver', (loserId) => {
+            alert(loserId === socket.id ? "הפסדת! היית התופס." : "ניצחת! ברחת בזמן.");
+        });
+
+        // תנועה — WASD + חצים
+        const keys = { w: false, a: false, s: false, d: false };
+        function applyKey(e, down) {
+            switch (e.key) {
+                case 'ArrowUp':
+                    keys.w = down;
+                    e.preventDefault();
+                    break;
+                case 'ArrowDown':
+                    keys.s = down;
+                    e.preventDefault();
+                    break;
+                case 'ArrowLeft':
+                    keys.a = down;
+                    e.preventDefault();
+                    break;
+                case 'ArrowRight':
+                    keys.d = down;
+                    e.preventDefault();
+                    break;
+                default: {
+                    const k = e.key.toLowerCase();
+                    if (k === 'w' || k === 'a' || k === 's' || k === 'd') keys[k] = down;
+                    break;
+                }
+            }
+        }
+        window.onkeydown = (e) => applyKey(e, true);
+        window.onkeyup = (e) => applyKey(e, false);
+
+        function tryMovePlayer(me, dx, dy) {
+            const nx = me.x + dx;
+            const ny = me.y + dy;
+            if (playerOverlapsWall(nx, ny, PLAYER_W, PLAYER_H)) return;
+            me.x = nx;
+            me.y = ny;
+        }
+
+        function update() {
+            const me = players[socket.id];
+            if (me) {
+                if (maze) {
+                    const step = me.isTagger ? BASE_MOVE_STEP * TAGGER_SPEED_MULT : BASE_MOVE_STEP;
+                    if (keys.w) tryMovePlayer(me, 0, -step);
+                    if (keys.s) tryMovePlayer(me, 0, step);
+                    if (keys.a) tryMovePlayer(me, -step, 0);
+                    if (keys.d) tryMovePlayer(me, step, 0);
+                }
+                camera.x = me.x + PLAYER_W / 2 - canvas.width / 2;
+                camera.y = me.y + PLAYER_H / 2 - canvas.height / 2;
+                socket.emit('playerMovement', { x: me.x, y: me.y });
+            }
+            stepRenderPositionInterpolation();
+            draw();
+            requestAnimationFrame(update);
+        }
+
+        function draw() {
+            ctx.fillStyle = MAZE_BG;
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            ctx.save();
+            ctx.translate(-camera.x, -camera.y);
+
+            if (maze) {
+                const rows = maze.length;
+                const cols = maze[0].length;
+                const mw = cols * cellSize;
+                const mh = rows * cellSize;
+                ctx.fillStyle = MAZE_BG;
+                ctx.fillRect(0, 0, mw, mh);
+                ctx.fillStyle = WALL_COLOR;
+                for (let r = 0; r < rows; r++) {
+                    for (let c = 0; c < cols; c++) {
+                        if (maze[r][c] === 1) {
+                            ctx.fillRect(c * cellSize, r * cellSize, cellSize, cellSize);
+                        }
+                    }
+                }
+            }
+            for (let id in players) {
+                let p = players[id];
+                const { x: rx, y: ry } = getDrawPositionForPlayer(id, p);
+                ctx.fillStyle = p.isTagger ? 'red' : p.color;
+                ctx.fillRect(rx, ry, PLAYER_W, PLAYER_H);
+                if (p.isTagger) {
+                    ctx.strokeStyle = 'white';
+                    ctx.strokeRect(rx - 2, ry - 2, PLAYER_W + 4, PLAYER_H + 4);
+                }
+            }
+
+            ctx.restore();
+        }
+        update();
+    </script>
+</body>
 </html>
