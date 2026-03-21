@@ -130,9 +130,11 @@ function getHumanCount() {
 const TAG_IMMUNITY_MS = 2000;
 const BOT_ID = 'BOT_1';
 const BOT_TICK_MS = 33;
-/** Must match client BASE_MOVE_STEP in index.html; bot is 15% faster. */
+/** Must match client BASE_MOVE_STEP in index.html. */
 const HUMAN_BASE_MOVE_STEP = 6;
-const BOT_STEP = HUMAN_BASE_MOVE_STEP * 1.15;
+const BOT_STEP = HUMAN_BASE_MOVE_STEP * 2;
+/** Max pixels per wall probe so 2× speed cannot skip through walls between checks. */
+const BOT_COLLISION_SUBSTEP = 3;
 const BOT_NODE_REACH = 14;
 const BOT_VISION_RADIUS = 300;
 const BOT_PATROL_MIN_MANHATTAN = 15;
@@ -472,28 +474,33 @@ function stepBotAlongPath() {
         }
         return;
     }
-    const step = Math.min(BOT_STEP, dist);
-    let nx = bot.x;
-    let ny = bot.y;
-    if (Math.abs(dx) >= Math.abs(dy)) {
-        nx += Math.sign(dx) * Math.min(step, Math.abs(dx));
+    const totalStep = Math.min(BOT_STEP, dist);
+    const signX = Math.sign(dx);
+    const signY = Math.sign(dy);
+    const capX = Math.min(totalStep, Math.abs(dx));
+    const capY = Math.min(totalStep, Math.abs(dy));
+    const preferX = Math.abs(dx) >= Math.abs(dy);
+
+    function advanceCardinal(useX, cap) {
+        let rem = cap;
+        while (rem > 1e-6) {
+            const chunk = Math.min(BOT_COLLISION_SUBSTEP, rem);
+            const nx = bot.x + (useX ? signX * chunk : 0);
+            const ny = bot.y + (useX ? 0 : signY * chunk);
+            if (touchesWall(nx, ny, PLAYER_W, PLAYER_H)) return false;
+            bot.x = nx;
+            bot.y = ny;
+            rem -= chunk;
+        }
+        return true;
+    }
+
+    if (preferX) {
+        if (advanceCardinal(true, capX)) return;
+        if (advanceCardinal(false, capY)) return;
     } else {
-        ny += Math.sign(dy) * Math.min(step, Math.abs(dy));
-    }
-    if (!touchesWall(nx, ny, PLAYER_W, PLAYER_H)) {
-        bot.x = nx;
-        bot.y = ny;
-        return;
-    }
-    const tryNx = bot.x + Math.sign(dx) * Math.min(step, Math.abs(dx));
-    if (!touchesWall(tryNx, bot.y, PLAYER_W, PLAYER_H)) {
-        bot.x = tryNx;
-        return;
-    }
-    const tryNy = bot.y + Math.sign(dy) * Math.min(step, Math.abs(dy));
-    if (!touchesWall(bot.x, tryNy, PLAYER_W, PLAYER_H)) {
-        bot.y = tryNy;
-        return;
+        if (advanceCardinal(false, capY)) return;
+        if (advanceCardinal(true, capX)) return;
     }
     resetBotPathState();
     botLastGoalKey = '';
