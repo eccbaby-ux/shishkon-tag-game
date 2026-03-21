@@ -263,11 +263,16 @@ io.on('connection', (socket) => {
                         let p = players[id];
                         let dist = Math.hypot(p.x - players[socket.id].x, p.y - players[socket.id].y);
                         if (dist < 30) { // מרחק נגיעה
+                            const newTagger = id;
                             players[socket.id].isTagger = false;
-                            players[id].isTagger = true;
-                            players[id].immuneUntil = Date.now() + TAG_IMMUNITY_MS;
-                            taggerId = id;
-                            io.emit('currentPlayers', playersForClients());
+                            players[newTagger].isTagger = true;
+                            players[newTagger].immuneUntil = Date.now() + TAG_IMMUNITY_MS;
+                            taggerId = newTagger;
+                            io.emit('tagEvent', {
+                                oldTagger: socket.id,
+                                newTagger,
+                                immuneUntil: players[newTagger].immuneUntil
+                            });
                         }
                     }
                 }

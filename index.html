@@ -154,7 +154,7 @@
 
         let hasJoined = false;
 
-        function renderLeaderboard() {
+        function updateLeaderboard() {
             if (!hasJoined) return;
             leaderboardList.innerHTML = '';
             const entries = Object.keys(players).map((id) => ({ id, ...players[id] }));
@@ -326,7 +326,22 @@
                 const p = players[id];
                 if (!renderPosition[id]) renderPosition[id] = { x: p.x, y: p.y };
             }
-            renderLeaderboard();
+            updateLeaderboard();
+        });
+        socket.on('tagEvent', (data) => {
+            if (!hasJoined || data == null || typeof data !== 'object') return;
+            const oldTagger = data.oldTagger;
+            const newTagger = data.newTagger;
+            const immuneUntil = data.immuneUntil;
+            if (typeof oldTagger !== 'string' || typeof newTagger !== 'string') return;
+            if (players[oldTagger]) players[oldTagger].isTagger = false;
+            if (players[newTagger]) {
+                players[newTagger].isTagger = true;
+                if (typeof immuneUntil === 'number' && Number.isFinite(immuneUntil)) {
+                    players[newTagger].immuneUntil = immuneUntil;
+                }
+            }
+            updateLeaderboard();
         });
         socket.on('gameReset', (data) => {
             if (!hasJoined) return;
@@ -340,7 +355,7 @@
                 renderPosition[id] = { x: p.x, y: p.y };
             }
             timerEl.innerText = formatSecondsAsMMSS(data.timer);
-            renderLeaderboard();
+            updateLeaderboard();
         });
         socket.on('playerMoved', (p) => {
             if (!hasJoined) return;
@@ -358,7 +373,7 @@
             if (!hasJoined) return;
             delete players[id];
             delete renderPosition[id];
-            renderLeaderboard();
+            updateLeaderboard();
         });
         socket.on('gameOver', (loserId) => {
             if (!hasJoined) return;
