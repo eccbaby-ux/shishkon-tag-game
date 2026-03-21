@@ -256,22 +256,23 @@ io.on('connection', (socket) => {
             players[socket.id].x = nx;
             players[socket.id].y = ny;
 
-            // בדיקת התנגשות (תפיסה) — תופס חסין לאחר הפיכה לתופס (מונע לולאת תג מיידית)
-            if (players[socket.id].isTagger && Date.now() > (players[socket.id].immuneUntil ?? 0)) {
+            // בדיקת התנגשות (תפיסה) — לא ניתן לתפוס שחקן בזמן חסינות; התופס לשעבר מקבל חסינות לבריחה
+            if (players[socket.id].isTagger) {
                 for (let id in players) {
                     if (id !== socket.id) {
                         let p = players[id];
                         let dist = Math.hypot(p.x - players[socket.id].x, p.y - players[socket.id].y);
-                        if (dist < 30) { // מרחק נגיעה
+                        if (dist < 30 && Date.now() > (players[id].immuneUntil || 0)) {
                             const newTagger = id;
                             players[socket.id].isTagger = false;
+                            players[socket.id].immuneUntil = Date.now() + TAG_IMMUNITY_MS;
                             players[newTagger].isTagger = true;
-                            players[newTagger].immuneUntil = Date.now() + TAG_IMMUNITY_MS;
+                            players[newTagger].immuneUntil = 0;
                             taggerId = newTagger;
                             io.emit('tagEvent', {
                                 oldTagger: socket.id,
                                 newTagger,
-                                immuneUntil: players[newTagger].immuneUntil
+                                immuneUntil: players[socket.id].immuneUntil
                             });
                         }
                     }

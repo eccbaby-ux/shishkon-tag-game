@@ -334,12 +334,15 @@
             const newTagger = data.newTagger;
             const immuneUntil = data.immuneUntil;
             if (typeof oldTagger !== 'string' || typeof newTagger !== 'string') return;
-            if (players[oldTagger]) players[oldTagger].isTagger = false;
+            if (players[oldTagger]) {
+                players[oldTagger].isTagger = false;
+                if (typeof immuneUntil === 'number' && Number.isFinite(immuneUntil)) {
+                    players[oldTagger].immuneUntil = immuneUntil;
+                }
+            }
             if (players[newTagger]) {
                 players[newTagger].isTagger = true;
-                if (typeof immuneUntil === 'number' && Number.isFinite(immuneUntil)) {
-                    players[newTagger].immuneUntil = immuneUntil;
-                }
+                players[newTagger].immuneUntil = 0;
             }
             updateLeaderboard();
         });
@@ -645,11 +648,10 @@
                 let p = players[id];
                 if (!p || typeof p.x !== 'number' || typeof p.y !== 'number') continue;
                 const { x: rx, y: ry } = getDrawPositionForPlayer(id, p);
-                const immuneUntil = p.immuneUntil ?? 0;
-                const isImmune = Date.now() < immuneUntil;
-                const taggerInGrace = p.isTagger && isImmune;
+                const immuneUntilTs = p.immuneUntil ?? 0;
+                const isImmune = Date.now() < immuneUntilTs;
                 ctx.save();
-                if (taggerInGrace) {
+                if (isImmune) {
                     ctx.globalAlpha = Math.floor(Date.now() / 200) % 2 === 0 ? 0.35 : 0.9;
                 }
                 ctx.fillStyle = p.isTagger ? 'red' : p.color;
