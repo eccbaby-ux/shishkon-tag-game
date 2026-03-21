@@ -119,14 +119,27 @@ let gameTimer = ROUND_SECONDS;
 let taggerId = null;
 let roundActive = true;
 
+function getHumanCount() {
+    let n = 0;
+    for (const id in players) {
+        if (!players[id].isBot) n++;
+    }
+    return n;
+}
+
 const TAG_IMMUNITY_MS = 2000;
 const BOT_ID = 'BOT_1';
 const BOT_TICK_MS = 33;
-const BOT_STEP = 5.5;
+const BOT_STEP = 9;
 const BOT_NODE_REACH = 14;
+const BOT_VISION_RADIUS = 300;
 
 let botCellPath = [];
 let botWaypointIdx = 0;
+let botWanderTr = -1;
+let botWanderTc = -1;
+let botLastPlannedMode = null;
+let botLastGoalKey = '';
 
 function getCellOfPlayer(pl) {
     const cx = pl.x + PLAYER_W / 2;
@@ -187,13 +200,68 @@ function bfsPath(sr, sc, tr, tc) {
     return null;
 }
 
-function nearestHuman(bot) {
-    let best = null;
-    let bestD = Infinity;
+function pixelDistCenters(a, b) {
+    const ax = a.x + PLAYER_W / 2;
+    const ay = a.y + PLAYER_H / 2;
+    const bx = b.x + PLAYER_W / 2;
+    const by = b.y + PLAYER_H / 2;
+    return Math.hypot(ax - bx, ay - by);
+}
+
+/** Bresenham line on grid: returns true if any traversed cell is a wall (1). */
+function gridLineHitsWall(r0, c0, r1, c1) {
+    let x0 = c0;
+    let y0 = r0;
+    let x1 = c1;
+    let y1 = r1;
+    const dx = Math.abs(x1 - x0);
+    const dy = Math.abs(y1 - y0);
+    const sx = x0 < x1 ? 1 : -1;
+    const sy = y0 < y1 ? 1 : -1;
+    let err = dx - dy;
+    let x = x0;
+    let y = y0;
+    let guard = MAZE_SIZE * MAZE_SIZE * 4;
+    while (guard-- > 0) {
+        if (y < 0 || y >= MAZE_SIZE || x < 0 || x >= MAZE_SIZE) return true;
+        if (maze[y][x] === 1) return true;
+        if (x === x1 && y === y1) break;
+        const e2 = 2 * err;
+        if (e2 > -dy) {
+            err -= dy;
+            x += sx;
+        }
+        if (e2 < dx) {
+            err += dx;
+            y += sy;
+        }
+    }
+    return false;
+}
+
+function hasLineOfSightBetweenPlayers(a, b) {
+    const ca = getCellOfPlayer(a);
+    const cb = getCellOfPlayer(b);
+    return !gridLineHitsWall(ca.r, ca.c, cb.r, cb.c);
+}
+
+function getVisibleNonBotHumans(bot) {
+    const out = [];
     for (const id in players) {
         const p = players[id];
         if (p.isBot) continue;
-        const d = Math.hypot(p.x - bot.x, p.y - bot.y);
+        if (pixelDistCenters(bot, p) > BOT_VISION_RADIUS) continue;
+        if (!hasLineOfSightBetweenPlayers(bot, p)) continue;
+        out.push(p);
+    }
+    return out;
+}
+
+function pickClosestVisibleHuman(bot, visible) {
+    let best = null;
+    let bestD = Infinity;
+    for (const p of visible) {
+        const d = pixelDistCenters(bot, p);
         if (d < bestD) {
             bestD = d;
             best = p;
@@ -202,43 +270,118 @@ function nearestHuman(bot) {
     return best;
 }
 
+function isHumanTaggerVisibleToBot(bot) {
+    const tag = taggerId ? players[taggerId] : null;
+    if (!tag || tag.isBot) return false;
+    if (pixelDistCenters(bot, tag) > BOT_VISION_RADIUS) return false;
+    return hasLineOfSightBetweenPlayers(bot, tag);
+}
+
+/** Farthest walkable cell along ray from tagger through bot (run away). */
+function fleeTargetCell(bot, tagger) {
+    const bx = bot.x + PLAYER_W / 2;
+    const by = bot.y + PLAYER_H / 2;
+    const tx = tagger.x + PLAYER_W / 2;
+    const ty = tagger.y + PLAYER_H / 2;
+    let dx = bx - tx;
+    let dy = by - ty;
+    const len = Math.hypot(dx, dy) || 1;
+    dx /= len;
+    dy /= len;
+    const start = getCellOfPlayer(bot);
+    let bestR = start.r;
+    let bestC = start.c;
+    let px = bx;
+    let py = by;
+    const stepPx = CELL_SIZE * 0.4;
+    const maxSteps = MAZE_SIZE * 4;
+    for (let i = 0; i < maxSteps; i++) {
+        px += dx * stepPx;
+        py += dy * stepPx;
+        const r = Math.min(MAZE_SIZE - 1, Math.max(0, Math.floor(py / CELL_SIZE)));
+        const c = Math.min(MAZE_SIZE - 1, Math.max(0, Math.floor(px / CELL_SIZE)));
+        if (maze[r][c] !== 0) break;
+        bestR = r;
+        bestC = c;
+    }
+    return { r: bestR, c: bestC };
+}
+
+function computeBotGoal(bot) {
+    if (bot.isTagger) {
+        const visible = getVisibleNonBotHumans(bot);
+        if (visible.length > 0) {
+            const target = pickClosestVisibleHuman(bot, visible);
+            const { r, c } = getCellOfPlayer(target);
+            return { mode: 'chase', tr: r, tc: c };
+        }
+        if (botWanderTr < 0) {
+            const w = randomWalkableCellCoords();
+            botWanderTr = w.r;
+            botWanderTc = w.c;
+        }
+        return { mode: 'wtag', tr: botWanderTr, tc: botWanderTc };
+    }
+    if (isHumanTaggerVisibleToBot(bot)) {
+        const tag = players[taggerId];
+        const f = fleeTargetCell(bot, tag);
+        return { mode: 'flee', tr: f.r, tc: f.c };
+    }
+    if (botWanderTr < 0) {
+        const w = randomWalkableCellCoords();
+        botWanderTr = w.r;
+        botWanderTc = w.c;
+    }
+    return { mode: 'wrun', tr: botWanderTr, tc: botWanderTc };
+}
+
 function resetBotPathState() {
     botCellPath = [];
     botWaypointIdx = 0;
 }
 
-function replanBotPath() {
-    const bot = players[BOT_ID];
-    if (!bot) return;
+function resetBotAiNavState() {
+    resetBotPathState();
+    botWanderTr = -1;
+    botWanderTc = -1;
+    botLastPlannedMode = null;
+    botLastGoalKey = '';
+}
+
+
+function buildBotPathToGoal(bot, tr, tc) {
     const { r: sr, c: sc } = getCellOfPlayer(bot);
-    if (maze[sr][sc] !== 0) return;
-    for (let tries = 0; tries < 16; tries++) {
-        let tr;
-        let tc;
-        if (bot.isTagger) {
-            const h = nearestHuman(bot);
-            if (h) {
-                const t = getCellOfPlayer(h);
-                tr = t.r;
-                tc = t.c;
-            } else {
-                const w = randomWalkableCellCoords();
-                tr = w.r;
-                tc = w.c;
-            }
-        } else {
+    if (maze[sr][sc] !== 0) return false;
+    const path = bfsPath(sr, sc, tr, tc);
+    if (path && path.length >= 2) {
+        botCellPath = path;
+        botWaypointIdx = 1;
+        return true;
+    }
+    return false;
+}
+
+function replanBotPathForGoal(bot, goal) {
+    const tr = goal.tr;
+    const tc = goal.tc;
+    if (goal.mode === 'wtag' || goal.mode === 'wrun') {
+        let wr = tr;
+        let wc = tc;
+        for (let tries = 0; tries < 24; tries++) {
+            if (buildBotPathToGoal(bot, wr, wc)) return;
             const w = randomWalkableCellCoords();
-            tr = w.r;
-            tc = w.c;
+            wr = w.r;
+            wc = w.c;
+            botWanderTr = wr;
+            botWanderTc = wc;
         }
-        const path = bfsPath(sr, sc, tr, tc);
-        if (path && path.length >= 2) {
-            botCellPath = path;
-            botWaypointIdx = 1;
-            return;
+    } else {
+        for (let tries = 0; tries < 8; tries++) {
+            if (buildBotPathToGoal(bot, tr, tc)) return;
         }
     }
     resetBotPathState();
+    botLastGoalKey = '';
 }
 
 function stepBotAlongPath() {
@@ -254,6 +397,11 @@ function stepBotAlongPath() {
         botWaypointIdx++;
         if (botWaypointIdx >= botCellPath.length) {
             resetBotPathState();
+            botLastGoalKey = '';
+            if (botLastPlannedMode === 'wtag' || botLastPlannedMode === 'wrun') {
+                botWanderTr = -1;
+                botWanderTc = -1;
+            }
         }
         return;
     }
@@ -281,6 +429,7 @@ function stepBotAlongPath() {
         return;
     }
     resetBotPathState();
+    botLastGoalKey = '';
 }
 
 function applyTag(oldTaggerId, newTaggerId) {
@@ -327,6 +476,21 @@ function createBotPlayer() {
     };
 }
 
+function removeBotFromGame() {
+    if (!players[BOT_ID]) return;
+    delete players[BOT_ID];
+    resetBotAiNavState();
+    const ids = Object.keys(players);
+    for (const id of ids) players[id].isTagger = false;
+    if (ids.length > 0) {
+        const next = ids[Math.floor(Math.random() * ids.length)];
+        players[next].isTagger = true;
+        taggerId = next;
+    } else {
+        taggerId = null;
+    }
+}
+
 function ensureBotInGame() {
     if (players[BOT_ID]) return;
     players[BOT_ID] = createBotPlayer();
@@ -335,7 +499,7 @@ function ensureBotInGame() {
     const tagger = ids[Math.floor(Math.random() * ids.length)];
     players[tagger].isTagger = true;
     taggerId = tagger;
-    resetBotPathState();
+    resetBotAiNavState();
 }
 
 function playerPayload(pl) {
@@ -404,7 +568,7 @@ function resetGame() {
     } else {
         taggerId = null;
     }
-    resetBotPathState();
+    resetBotAiNavState();
     io.emit('gameReset', {
         maze,
         cellSize: CELL_SIZE,
@@ -448,6 +612,12 @@ io.on('connection', (socket) => {
             immuneUntil: 0
         };
 
+        if (getHumanCount() >= 2 && players[BOT_ID]) {
+            removeBotFromGame();
+        } else if (getHumanCount() === 1) {
+            ensureBotInGame();
+        }
+
         socket.emit('mazeData', {
             maze,
             cellSize: CELL_SIZE,
@@ -479,8 +649,30 @@ io.on('connection', (socket) => {
     socket.on('disconnect', () => {
         if (!players[socket.id]) return;
         const wasTagger = taggerId === socket.id;
-        delete players[socket.id];
-        io.emit('playerDisconnected', socket.id);
+        const sid = socket.id;
+        delete players[sid];
+        io.emit('playerDisconnected', sid);
+
+        const humans = getHumanCount();
+
+        if (humans === 0) {
+            if (players[BOT_ID]) {
+                delete players[BOT_ID];
+                resetBotAiNavState();
+            }
+            taggerId = null;
+            io.emit('currentPlayers', playersForClients());
+            return;
+        }
+
+        if (humans === 1) {
+            ensureBotInGame();
+            io.emit('currentPlayers', playersForClients());
+            return;
+        }
+
+        if (players[BOT_ID]) removeBotFromGame();
+
         if (wasTagger) {
             const ids = Object.keys(players);
             if (ids.length > 0) {
@@ -498,25 +690,35 @@ io.on('connection', (socket) => {
 });
 
 setInterval(() => {
-    if (!roundActive || !players[BOT_ID]) return;
+    if (!roundActive) return;
     const bot = players[BOT_ID];
-    if (botCellPath.length === 0 || botWaypointIdx >= botCellPath.length) {
-        replanBotPath();
-    } else if (bot.isTagger) {
-        const h = nearestHuman(bot);
-        if (h) {
-            const { r, c } = getCellOfPlayer(h);
-            const end = botCellPath[botCellPath.length - 1];
-            if (!end || end[0] !== r || end[1] !== c) replanBotPath();
+    if (!bot) return;
+    let goal = computeBotGoal(bot);
+    if (goal.mode !== botLastPlannedMode) {
+        resetBotPathState();
+        botLastPlannedMode = goal.mode;
+        if (goal.mode === 'wtag' || goal.mode === 'wrun') {
+            botWanderTr = -1;
+            botWanderTc = -1;
         }
+        goal = computeBotGoal(bot);
+    }
+    const key = `${goal.mode}|${goal.tr}|${goal.tc}`;
+    if (
+        key !== botLastGoalKey ||
+        botCellPath.length === 0 ||
+        botWaypointIdx >= botCellPath.length
+    ) {
+        replanBotPathForGoal(bot, goal);
+        botLastGoalKey = key;
     }
     stepBotAlongPath();
-    if (botCellPath.length === 0) replanBotPath();
+    if (!players[BOT_ID]) return;
     attemptTagFrom(BOT_ID);
-    io.emit('playerMoved', playerPayload(bot));
+    const botAfter = players[BOT_ID];
+    if (!botAfter) return;
+    io.emit('playerMoved', playerPayload(botAfter));
 }, BOT_TICK_MS);
-
-ensureBotInGame();
 
 const PORT = Number(process.env.PORT) || 3000;
 httpServer.listen(PORT, () => {
