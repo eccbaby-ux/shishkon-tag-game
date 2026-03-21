@@ -130,9 +130,12 @@ function getHumanCount() {
 const TAG_IMMUNITY_MS = 2000;
 const BOT_ID = 'BOT_1';
 const BOT_TICK_MS = 33;
-const BOT_STEP = 9;
+/** Must match client BASE_MOVE_STEP in index.html; bot is 15% faster. */
+const HUMAN_BASE_MOVE_STEP = 6;
+const BOT_STEP = HUMAN_BASE_MOVE_STEP * 1.15;
 const BOT_NODE_REACH = 14;
 const BOT_VISION_RADIUS = 300;
+const BOT_PATROL_MIN_MANHATTAN = 15;
 
 let botCellPath = [];
 let botWaypointIdx = 0;
@@ -140,6 +143,9 @@ let botWanderTr = -1;
 let botWanderTc = -1;
 let botLastPlannedMode = null;
 let botLastGoalKey = '';
+/** Last cell where tagger-bot saw a human (grid); -1 = none. Used after LOS breaks. */
+let botLastSeenR = -1;
+let botLastSeenC = -1;
 
 function getCellOfPlayer(pl) {
     const cx = pl.x + PLAYER_W / 2;
@@ -160,6 +166,26 @@ function randomWalkableCellCoords() {
     if (cells.length === 0) return { r: 1, c: 1 };
     const [r, c] = cells[Math.floor(Math.random() * cells.length)];
     return { r, c };
+}
+
+/** Patrol target at least BOT_PATROL_MIN_MANHATTAN Manhattan steps away (reduces small loops). */
+function randomPatrolCellFarFrom(sr, sc) {
+    for (let attempt = 0; attempt < 100; attempt++) {
+        const w = randomWalkableCellCoords();
+        const man = Math.abs(w.r - sr) + Math.abs(w.c - sc);
+        if (man >= BOT_PATROL_MIN_MANHATTAN) return w;
+    }
+    let best = randomWalkableCellCoords();
+    let bestM = Math.abs(best.r - sr) + Math.abs(best.c - sc);
+    for (let i = 0; i < 80; i++) {
+        const w = randomWalkableCellCoords();
+        const man = Math.abs(w.r - sr) + Math.abs(w.c - sc);
+        if (man > bestM) {
+            bestM = man;
+            best = w;
+        }
+    }
+    return best;
 }
 
 function bfsPath(sr, sc, tr, tc) {
@@ -308,15 +334,42 @@ function fleeTargetCell(bot, tagger) {
 }
 
 function computeBotGoal(bot) {
+    if (!bot.isTagger) {
+        botLastSeenR = -1;
+        botLastSeenC = -1;
+    }
+
     if (bot.isTagger) {
         const visible = getVisibleNonBotHumans(bot);
         if (visible.length > 0) {
             const target = pickClosestVisibleHuman(bot, visible);
             const { r, c } = getCellOfPlayer(target);
+            botLastSeenR = r;
+            botLastSeenC = c;
             return { mode: 'chase', tr: r, tc: c };
         }
+        const { r: br, c: bc } = getCellOfPlayer(bot);
+        if (
+            botLastSeenR >= 0 &&
+            botLastSeenC >= 0 &&
+            botLastSeenR < MAZE_SIZE &&
+            botLastSeenC < MAZE_SIZE &&
+            maze[botLastSeenR][botLastSeenC] === 0
+        ) {
+            if (br === botLastSeenR && bc === botLastSeenC) {
+                botLastSeenR = -1;
+                botLastSeenC = -1;
+                botWanderTr = -1;
+                botWanderTc = -1;
+            } else {
+                return { mode: 'pursue', tr: botLastSeenR, tc: botLastSeenC };
+            }
+        } else {
+            botLastSeenR = -1;
+            botLastSeenC = -1;
+        }
         if (botWanderTr < 0) {
-            const w = randomWalkableCellCoords();
+            const w = randomPatrolCellFarFrom(br, bc);
             botWanderTr = w.r;
             botWanderTc = w.c;
         }
@@ -328,7 +381,8 @@ function computeBotGoal(bot) {
         return { mode: 'flee', tr: f.r, tc: f.c };
     }
     if (botWanderTr < 0) {
-        const w = randomWalkableCellCoords();
+        const { r: br, c: bc } = getCellOfPlayer(bot);
+        const w = randomPatrolCellFarFrom(br, bc);
         botWanderTr = w.r;
         botWanderTc = w.c;
     }
@@ -346,6 +400,8 @@ function resetBotAiNavState() {
     botWanderTc = -1;
     botLastPlannedMode = null;
     botLastGoalKey = '';
+    botLastSeenR = -1;
+    botLastSeenC = -1;
 }
 
 
@@ -365,11 +421,12 @@ function replanBotPathForGoal(bot, goal) {
     const tr = goal.tr;
     const tc = goal.tc;
     if (goal.mode === 'wtag' || goal.mode === 'wrun') {
+        const { r: sr, c: sc } = getCellOfPlayer(bot);
         let wr = tr;
         let wc = tc;
-        for (let tries = 0; tries < 24; tries++) {
+        for (let tries = 0; tries < 28; tries++) {
             if (buildBotPathToGoal(bot, wr, wc)) return;
-            const w = randomWalkableCellCoords();
+            const w = randomPatrolCellFarFrom(sr, sc);
             wr = w.r;
             wc = w.c;
             botWanderTr = wr;
@@ -378,6 +435,10 @@ function replanBotPathForGoal(bot, goal) {
     } else {
         for (let tries = 0; tries < 8; tries++) {
             if (buildBotPathToGoal(bot, tr, tc)) return;
+        }
+        if (goal.mode === 'pursue') {
+            botLastSeenR = -1;
+            botLastSeenC = -1;
         }
     }
     resetBotPathState();
@@ -399,6 +460,12 @@ function stepBotAlongPath() {
             resetBotPathState();
             botLastGoalKey = '';
             if (botLastPlannedMode === 'wtag' || botLastPlannedMode === 'wrun') {
+                botWanderTr = -1;
+                botWanderTc = -1;
+            }
+            if (botLastPlannedMode === 'pursue') {
+                botLastSeenR = -1;
+                botLastSeenC = -1;
                 botWanderTr = -1;
                 botWanderTc = -1;
             }
