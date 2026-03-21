@@ -65,9 +65,25 @@
             visibility: hidden;
             pointer-events: none;
         }
+        #gameTitle {
+            position: absolute;
+            top: calc(env(safe-area-inset-top, 0px) + 0.5rem);
+            left: 50%;
+            transform: translateX(-50%);
+            z-index: 100;
+            pointer-events: none;
+            margin: 0;
+            padding: 0 0.75rem;
+            font-size: clamp(1.05rem, 4vw, 1.45rem);
+            font-weight: 700;
+            letter-spacing: 0.03em;
+            color: rgba(255, 255, 255, 0.97);
+            text-shadow: 0 1px 4px rgba(0, 0, 0, 0.9);
+            white-space: nowrap;
+        }
         #ui {
             position: absolute;
-            top: calc(env(safe-area-inset-top, 0px) + 2.5%);
+            top: calc(env(safe-area-inset-top, 0px) + 2.65rem);
             left: calc(env(safe-area-inset-left, 0px) + 2.5%);
             z-index: 100;
             pointer-events: none;
@@ -129,6 +145,7 @@
     </div>
 
     <div id="gameScreen" class="game-hidden">
+        <h1 id="gameTitle">מבוך תופסת</h1>
         <div id="ui">
             <h1 id="timer">2:00</h1>
             <p id="status">חפש מישהו לתפוס!</p>

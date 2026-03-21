@@ -149,6 +149,10 @@ let botLastGoalKey = '';
 /** Last grid cell of a human while they were inside vision box; -1 = none. Used when they leave the box. */
 let botLastSeenR = -1;
 let botLastSeenC = -1;
+/** Stable flee destination so we do not replan every tick (avoids stutter). */
+let botFleeTr = -1;
+let botFleeTc = -1;
+let botFleeTaggerCellKey = '';
 
 function getCellOfPlayer(pl) {
     const cx = pl.x + PLAYER_W / 2;
@@ -275,8 +279,62 @@ function isHumanTaggerVisibleToBot(bot) {
     return isHumanInBotViewportRect(bot, tag);
 }
 
-/** Farthest walkable cell along ray from tagger through bot (run away). */
-function fleeTargetCell(bot, tagger) {
+/** Pixel position for default spawn alignment in cell (r,c). */
+function cellToPlayerTopleft(r, c) {
+    return {
+        x: c * CELL_SIZE + (CELL_SIZE - PLAYER_W) / 2,
+        y: r * CELL_SIZE + (CELL_SIZE - PLAYER_H) / 2
+    };
+}
+
+/** True if bot top-left at (x,y) is outside tagger's vision box (same rule as isHumanInBotViewportRect). */
+function isOutsideTaggerViewport(tagger, x, y) {
+    return (
+        Math.abs(tagger.x - x) > BOT_VISION_RANGE || Math.abs(tagger.y - y) > BOT_VISION_RANGE
+    );
+}
+
+/**
+ * BFS: nearest walkable cell whose default player rect is outside the tagger's vision box.
+ * Fallback: ray along flee direction (old behavior).
+ */
+function fleeTargetOutsideTaggerViewport(bot, tagger) {
+    const sr = getCellOfPlayer(bot).r;
+    const sc = getCellOfPlayer(bot).c;
+    if (maze[sr][sc] !== 0) return { r: sr, c: sc };
+    const q = [[sr, sc]];
+    const seen = new Set([`${sr},${sc}`]);
+    const dirs = [
+        [0, 1],
+        [1, 0],
+        [0, -1],
+        [-1, 0]
+    ];
+    while (q.length) {
+        const [r, c] = q.shift();
+        const pos = cellToPlayerTopleft(r, c);
+        if (
+            (r !== sr || c !== sc) &&
+            isOutsideTaggerViewport(tagger, pos.x, pos.y)
+        ) {
+            return { r, c };
+        }
+        for (const [dr, dc] of dirs) {
+            const nr = r + dr;
+            const nc = c + dc;
+            if (nr < 0 || nr >= MAZE_SIZE || nc < 0 || nc >= MAZE_SIZE) continue;
+            if (maze[nr][nc] !== 0) continue;
+            const k = `${nr},${nc}`;
+            if (seen.has(k)) continue;
+            seen.add(k);
+            q.push([nr, nc]);
+        }
+    }
+    return fleeTargetCellRayFallback(bot, tagger);
+}
+
+/** Farthest walkable cell along ray from tagger through bot. */
+function fleeTargetCellRayFallback(bot, tagger) {
     const bx = bot.x + PLAYER_W / 2;
     const by = bot.y + PLAYER_H / 2;
     const tx = tagger.x + PLAYER_W / 2;
@@ -349,9 +407,32 @@ function computeBotGoal(bot) {
     }
     if (isHumanTaggerVisibleToBot(bot)) {
         const tag = players[taggerId];
-        const f = fleeTargetCell(bot, tag);
-        return { mode: 'flee', tr: f.r, tc: f.c };
+        const { r: br, c: bc } = getCellOfPlayer(bot);
+        const tCell = getCellOfPlayer(tag);
+        const tagKey = `${tCell.r},${tCell.c}`;
+        const stillInsideViewport =
+            Math.abs(tag.x - bot.x) <= BOT_VISION_RANGE &&
+            Math.abs(tag.y - bot.y) <= BOT_VISION_RANGE;
+        if (
+            botFleeTr >= 0 &&
+            br === botFleeTr &&
+            bc === botFleeTc &&
+            stillInsideViewport
+        ) {
+            botFleeTr = -1;
+            botFleeTc = -1;
+        }
+        if (botFleeTr < 0 || tagKey !== botFleeTaggerCellKey) {
+            const f = fleeTargetOutsideTaggerViewport(bot, tag);
+            botFleeTr = f.r;
+            botFleeTc = f.c;
+            botFleeTaggerCellKey = tagKey;
+        }
+        return { mode: 'flee', tr: botFleeTr, tc: botFleeTc };
     }
+    botFleeTr = -1;
+    botFleeTc = -1;
+    botFleeTaggerCellKey = '';
     if (botWanderTr < 0) {
         const { r: br, c: bc } = getCellOfPlayer(bot);
         const w = randomPatrolCellFarFrom(br, bc);
@@ -374,6 +455,9 @@ function resetBotAiNavState() {
     botLastGoalKey = '';
     botLastSeenR = -1;
     botLastSeenC = -1;
+    botFleeTr = -1;
+    botFleeTc = -1;
+    botFleeTaggerCellKey = '';
 }
 
 
