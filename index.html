@@ -130,7 +130,7 @@
 
     <div id="gameScreen" class="game-hidden">
         <div id="ui">
-            <h1 id="timer">1:00</h1>
+            <h1 id="timer">2:00</h1>
             <p id="status">חפש מישהו לתפוס!</p>
         </div>
         <div id="leaderboard" aria-label="שחקנים">
@@ -153,6 +153,7 @@
         const leaderboardList = document.getElementById('leaderboardList');
 
         let hasJoined = false;
+        let myPlayerName = null;
 
         function updateLeaderboard() {
             if (!hasJoined) return;
@@ -184,7 +185,8 @@
                 nameInput.focus();
                 return;
             }
-            socket.emit('joinGame', { name: trimmed.slice(0, 24) });
+            myPlayerName = trimmed.slice(0, 24);
+            socket.emit('joinGame', { name: myPlayerName });
             hasJoined = true;
             loginOverlay.classList.add('hidden');
             gameScreen.classList.remove('game-hidden');
@@ -199,6 +201,10 @@
             }
         });
         nameInput.focus();
+
+        socket.on('connect', () => {
+            if (myPlayerName) socket.emit('joinGame', { name: myPlayerName });
+        });
 
         const MAZE_BG = '#333';
         const WALL_COLOR = '#252525';
@@ -447,6 +453,14 @@
             touchMoveInput.vecY = 0;
             detachFloatJoyDocumentListeners();
         }
+
+        function resetMovementInputOnBlur() {
+            keys.w = keys.a = keys.s = keys.d = false;
+            lastMoveDirX = 0;
+            lastMoveDirY = 0;
+            resetFloatJoystick();
+        }
+        window.addEventListener('blur', resetMovementInputOnBlur);
 
         function updateFloatJoystickKnob(clientX, clientY) {
             let dx = clientX - floatJoy.centerX;

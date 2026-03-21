@@ -16,7 +16,7 @@ const MAZE_SIZE = 30;
 const CELL_SIZE = 52;
 const PLAYER_W = 30;
 const PLAYER_H = 30;
-const ROUND_SECONDS = 60;
+const ROUND_SECONDS = 120;
 
 function shuffleInPlace(arr) {
     for (let i = arr.length - 1; i > 0; i--) {
