@@ -136,7 +136,8 @@ const BOT_STEP = HUMAN_BASE_MOVE_STEP * 2;
 /** Max pixels per wall probe so 2× speed cannot skip through walls between checks. */
 const BOT_COLLISION_SUBSTEP = 3;
 const BOT_NODE_REACH = 14;
-const BOT_VISION_RADIUS = 300;
+/** Viewport-style range: ±pixels on X/Y from bot. Humans inside are "seen" (walls do not block). */
+const BOT_VISION_RANGE = 400;
 const BOT_PATROL_MIN_MANHATTAN = 15;
 
 let botCellPath = [];
@@ -145,7 +146,7 @@ let botWanderTr = -1;
 let botWanderTc = -1;
 let botLastPlannedMode = null;
 let botLastGoalKey = '';
-/** Last cell where tagger-bot saw a human (grid); -1 = none. Used after LOS breaks. */
+/** Last grid cell of a human while they were inside vision box; -1 = none. Used when they leave the box. */
 let botLastSeenR = -1;
 let botLastSeenC = -1;
 
@@ -236,50 +237,20 @@ function pixelDistCenters(a, b) {
     return Math.hypot(ax - bx, ay - by);
 }
 
-/** Bresenham line on grid: returns true if any traversed cell is a wall (1). */
-function gridLineHitsWall(r0, c0, r1, c1) {
-    let x0 = c0;
-    let y0 = r0;
-    let x1 = c1;
-    let y1 = r1;
-    const dx = Math.abs(x1 - x0);
-    const dy = Math.abs(y1 - y0);
-    const sx = x0 < x1 ? 1 : -1;
-    const sy = y0 < y1 ? 1 : -1;
-    let err = dx - dy;
-    let x = x0;
-    let y = y0;
-    let guard = MAZE_SIZE * MAZE_SIZE * 4;
-    while (guard-- > 0) {
-        if (y < 0 || y >= MAZE_SIZE || x < 0 || x >= MAZE_SIZE) return true;
-        if (maze[y][x] === 1) return true;
-        if (x === x1 && y === y1) break;
-        const e2 = 2 * err;
-        if (e2 > -dy) {
-            err -= dy;
-            x += sx;
-        }
-        if (e2 < dx) {
-            err += dx;
-            y += sy;
-        }
-    }
-    return false;
+function isHumanInBotViewportRect(bot, human) {
+    return (
+        Math.abs(bot.x - human.x) <= BOT_VISION_RANGE &&
+        Math.abs(bot.y - human.y) <= BOT_VISION_RANGE
+    );
 }
 
-function hasLineOfSightBetweenPlayers(a, b) {
-    const ca = getCellOfPlayer(a);
-    const cb = getCellOfPlayer(b);
-    return !gridLineHitsWall(ca.r, ca.c, cb.r, cb.c);
-}
-
-function getVisibleNonBotHumans(bot) {
+/** Humans inside vision box only (no wall / LOS check). */
+function getHumansInBotViewport(bot) {
     const out = [];
     for (const id in players) {
         const p = players[id];
         if (p.isBot) continue;
-        if (pixelDistCenters(bot, p) > BOT_VISION_RADIUS) continue;
-        if (!hasLineOfSightBetweenPlayers(bot, p)) continue;
+        if (!isHumanInBotViewportRect(bot, p)) continue;
         out.push(p);
     }
     return out;
@@ -301,8 +272,7 @@ function pickClosestVisibleHuman(bot, visible) {
 function isHumanTaggerVisibleToBot(bot) {
     const tag = taggerId ? players[taggerId] : null;
     if (!tag || tag.isBot) return false;
-    if (pixelDistCenters(bot, tag) > BOT_VISION_RADIUS) return false;
-    return hasLineOfSightBetweenPlayers(bot, tag);
+    return isHumanInBotViewportRect(bot, tag);
 }
 
 /** Farthest walkable cell along ray from tagger through bot (run away). */
@@ -342,7 +312,7 @@ function computeBotGoal(bot) {
     }
 
     if (bot.isTagger) {
-        const visible = getVisibleNonBotHumans(bot);
+        const visible = getHumansInBotViewport(bot);
         if (visible.length > 0) {
             const target = pickClosestVisibleHuman(bot, visible);
             const { r, c } = getCellOfPlayer(target);
