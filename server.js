@@ -120,6 +120,223 @@ let taggerId = null;
 let roundActive = true;
 
 const TAG_IMMUNITY_MS = 2000;
+const BOT_ID = 'BOT_1';
+const BOT_TICK_MS = 33;
+const BOT_STEP = 5.5;
+const BOT_NODE_REACH = 14;
+
+let botCellPath = [];
+let botWaypointIdx = 0;
+
+function getCellOfPlayer(pl) {
+    const cx = pl.x + PLAYER_W / 2;
+    const cy = pl.y + PLAYER_H / 2;
+    return {
+        r: Math.min(MAZE_SIZE - 1, Math.max(0, Math.floor(cy / CELL_SIZE))),
+        c: Math.min(MAZE_SIZE - 1, Math.max(0, Math.floor(cx / CELL_SIZE)))
+    };
+}
+
+function randomWalkableCellCoords() {
+    const cells = [];
+    for (let r = 0; r < MAZE_SIZE; r++) {
+        for (let c = 0; c < MAZE_SIZE; c++) {
+            if (maze[r][c] === 0) cells.push([r, c]);
+        }
+    }
+    if (cells.length === 0) return { r: 1, c: 1 };
+    const [r, c] = cells[Math.floor(Math.random() * cells.length)];
+    return { r, c };
+}
+
+function bfsPath(sr, sc, tr, tc) {
+    if (maze[sr]?.[sc] !== 0 || maze[tr]?.[tc] !== 0) return null;
+    const parent = Object.create(null);
+    const startKey = `${sr},${sc}`;
+    parent[startKey] = null;
+    const q = [[sr, sc]];
+    const dirs = [
+        [0, 1],
+        [1, 0],
+        [0, -1],
+        [-1, 0]
+    ];
+    while (q.length) {
+        const [r, c] = q.shift();
+        if (r === tr && c === tc) {
+            const out = [];
+            let k = `${r},${c}`;
+            while (k) {
+                const [rr, cc] = k.split(',').map(Number);
+                out.unshift([rr, cc]);
+                k = parent[k];
+            }
+            return out;
+        }
+        for (const [dr, dc] of dirs) {
+            const nr = r + dr;
+            const nc = c + dc;
+            if (nr < 0 || nr >= MAZE_SIZE || nc < 0 || nc >= MAZE_SIZE) continue;
+            if (maze[nr][nc] !== 0) continue;
+            const nk = `${nr},${nc}`;
+            if (nk in parent) continue;
+            parent[nk] = `${r},${c}`;
+            q.push([nr, nc]);
+        }
+    }
+    return null;
+}
+
+function nearestHuman(bot) {
+    let best = null;
+    let bestD = Infinity;
+    for (const id in players) {
+        const p = players[id];
+        if (p.isBot) continue;
+        const d = Math.hypot(p.x - bot.x, p.y - bot.y);
+        if (d < bestD) {
+            bestD = d;
+            best = p;
+        }
+    }
+    return best;
+}
+
+function resetBotPathState() {
+    botCellPath = [];
+    botWaypointIdx = 0;
+}
+
+function replanBotPath() {
+    const bot = players[BOT_ID];
+    if (!bot) return;
+    const { r: sr, c: sc } = getCellOfPlayer(bot);
+    if (maze[sr][sc] !== 0) return;
+    for (let tries = 0; tries < 16; tries++) {
+        let tr;
+        let tc;
+        if (bot.isTagger) {
+            const h = nearestHuman(bot);
+            if (h) {
+                const t = getCellOfPlayer(h);
+                tr = t.r;
+                tc = t.c;
+            } else {
+                const w = randomWalkableCellCoords();
+                tr = w.r;
+                tc = w.c;
+            }
+        } else {
+            const w = randomWalkableCellCoords();
+            tr = w.r;
+            tc = w.c;
+        }
+        const path = bfsPath(sr, sc, tr, tc);
+        if (path && path.length >= 2) {
+            botCellPath = path;
+            botWaypointIdx = 1;
+            return;
+        }
+    }
+    resetBotPathState();
+}
+
+function stepBotAlongPath() {
+    const bot = players[BOT_ID];
+    if (!bot || botCellPath.length === 0 || botWaypointIdx >= botCellPath.length) return;
+    const [wr, wc] = botCellPath[botWaypointIdx];
+    const targetX = wc * CELL_SIZE + (CELL_SIZE - PLAYER_W) / 2;
+    const targetY = wr * CELL_SIZE + (CELL_SIZE - PLAYER_H) / 2;
+    const dx = targetX - bot.x;
+    const dy = targetY - bot.y;
+    const dist = Math.hypot(dx, dy);
+    if (dist < BOT_NODE_REACH) {
+        botWaypointIdx++;
+        if (botWaypointIdx >= botCellPath.length) {
+            resetBotPathState();
+        }
+        return;
+    }
+    const step = Math.min(BOT_STEP, dist);
+    let nx = bot.x;
+    let ny = bot.y;
+    if (Math.abs(dx) >= Math.abs(dy)) {
+        nx += Math.sign(dx) * Math.min(step, Math.abs(dx));
+    } else {
+        ny += Math.sign(dy) * Math.min(step, Math.abs(dy));
+    }
+    if (!touchesWall(nx, ny, PLAYER_W, PLAYER_H)) {
+        bot.x = nx;
+        bot.y = ny;
+        return;
+    }
+    const tryNx = bot.x + Math.sign(dx) * Math.min(step, Math.abs(dx));
+    if (!touchesWall(tryNx, bot.y, PLAYER_W, PLAYER_H)) {
+        bot.x = tryNx;
+        return;
+    }
+    const tryNy = bot.y + Math.sign(dy) * Math.min(step, Math.abs(dy));
+    if (!touchesWall(bot.x, tryNy, PLAYER_W, PLAYER_H)) {
+        bot.y = tryNy;
+        return;
+    }
+    resetBotPathState();
+}
+
+function applyTag(oldTaggerId, newTaggerId) {
+    const T = players[oldTaggerId];
+    const N = players[newTaggerId];
+    if (!T || !N) return;
+    T.isTagger = false;
+    T.immuneUntil = Date.now() + TAG_IMMUNITY_MS;
+    N.isTagger = true;
+    N.immuneUntil = 0;
+    taggerId = newTaggerId;
+    io.emit('tagEvent', {
+        oldTagger: oldTaggerId,
+        newTagger: newTaggerId,
+        immuneUntil: T.immuneUntil
+    });
+}
+
+function attemptTagFrom(taggerPlId) {
+    const tagger = players[taggerPlId];
+    if (!tagger || !tagger.isTagger) return;
+    for (const id in players) {
+        if (id === taggerPlId) continue;
+        const p = players[id];
+        const dist = Math.hypot(p.x - tagger.x, p.y - tagger.y);
+        if (dist < 30 && Date.now() > (p.immuneUntil || 0)) {
+            applyTag(taggerPlId, id);
+            return;
+        }
+    }
+}
+
+function createBotPlayer() {
+    const spawn = findValidSpawnPoint();
+    return {
+        x: spawn.x,
+        y: spawn.y,
+        id: BOT_ID,
+        name: 'Bot-Terminator',
+        color: '#00b894',
+        isTagger: false,
+        immuneUntil: 0,
+        isBot: true
+    };
+}
+
+function ensureBotInGame() {
+    if (players[BOT_ID]) return;
+    players[BOT_ID] = createBotPlayer();
+    const ids = Object.keys(players);
+    for (const id of ids) players[id].isTagger = false;
+    const tagger = ids[Math.floor(Math.random() * ids.length)];
+    players[tagger].isTagger = true;
+    taggerId = tagger;
+    resetBotPathState();
+}
 
 function playerPayload(pl) {
     const now = Date.now();
@@ -132,7 +349,8 @@ function playerPayload(pl) {
         color: pl.color,
         isTagger: pl.isTagger,
         immuneUntil: until,
-        isImmune: now < until
+        isImmune: now < until,
+        isBot: !!pl.isBot
     };
 }
 
@@ -150,7 +368,8 @@ function playersForClients() {
             color: pl.color,
             isTagger: pl.isTagger,
             immuneUntil: until,
-            isImmune: now < until
+            isImmune: now < until,
+            isBot: !!pl.isBot
         };
     }
     return out;
@@ -185,6 +404,7 @@ function resetGame() {
     } else {
         taggerId = null;
     }
+    resetBotPathState();
     io.emit('gameReset', {
         maze,
         cellSize: CELL_SIZE,
@@ -228,11 +448,6 @@ io.on('connection', (socket) => {
             immuneUntil: 0
         };
 
-        if (Object.keys(players).length === 1) {
-            players[socket.id].isTagger = true;
-            taggerId = socket.id;
-        }
-
         socket.emit('mazeData', {
             maze,
             cellSize: CELL_SIZE,
@@ -256,28 +471,7 @@ io.on('connection', (socket) => {
             players[socket.id].x = nx;
             players[socket.id].y = ny;
 
-            // בדיקת התנגשות (תפיסה) — לא ניתן לתפוס שחקן בזמן חסינות; התופס לשעבר מקבל חסינות לבריחה
-            if (players[socket.id].isTagger) {
-                for (let id in players) {
-                    if (id !== socket.id) {
-                        let p = players[id];
-                        let dist = Math.hypot(p.x - players[socket.id].x, p.y - players[socket.id].y);
-                        if (dist < 30 && Date.now() > (players[id].immuneUntil || 0)) {
-                            const newTagger = id;
-                            players[socket.id].isTagger = false;
-                            players[socket.id].immuneUntil = Date.now() + TAG_IMMUNITY_MS;
-                            players[newTagger].isTagger = true;
-                            players[newTagger].immuneUntil = 0;
-                            taggerId = newTagger;
-                            io.emit('tagEvent', {
-                                oldTagger: socket.id,
-                                newTagger,
-                                immuneUntil: players[socket.id].immuneUntil
-                            });
-                        }
-                    }
-                }
-            }
+            attemptTagFrom(socket.id);
             socket.broadcast.emit('playerMoved', playerPayload(players[socket.id]));
         }
     });
@@ -302,6 +496,27 @@ io.on('connection', (socket) => {
         }
     });
 });
+
+setInterval(() => {
+    if (!roundActive || !players[BOT_ID]) return;
+    const bot = players[BOT_ID];
+    if (botCellPath.length === 0 || botWaypointIdx >= botCellPath.length) {
+        replanBotPath();
+    } else if (bot.isTagger) {
+        const h = nearestHuman(bot);
+        if (h) {
+            const { r, c } = getCellOfPlayer(h);
+            const end = botCellPath[botCellPath.length - 1];
+            if (!end || end[0] !== r || end[1] !== c) replanBotPath();
+        }
+    }
+    stepBotAlongPath();
+    if (botCellPath.length === 0) replanBotPath();
+    attemptTagFrom(BOT_ID);
+    io.emit('playerMoved', playerPayload(bot));
+}, BOT_TICK_MS);
+
+ensureBotInGame();
 
 const PORT = Number(process.env.PORT) || 3000;
 httpServer.listen(PORT, () => {
