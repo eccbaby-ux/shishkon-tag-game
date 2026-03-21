@@ -119,6 +119,54 @@ let gameTimer = ROUND_SECONDS;
 let taggerId = null;
 let roundActive = true;
 
+const TAG_IMMUNITY_MS = 2000;
+
+function playerPayload(pl) {
+    const now = Date.now();
+    const until = pl.immuneUntil ?? 0;
+    return {
+        x: pl.x,
+        y: pl.y,
+        id: pl.id,
+        name: pl.name,
+        color: pl.color,
+        isTagger: pl.isTagger,
+        immuneUntil: until,
+        isImmune: now < until
+    };
+}
+
+function playersForClients() {
+    const now = Date.now();
+    const out = {};
+    for (const id in players) {
+        const pl = players[id];
+        const until = pl.immuneUntil ?? 0;
+        out[id] = {
+            x: pl.x,
+            y: pl.y,
+            id: pl.id,
+            name: pl.name,
+            color: pl.color,
+            isTagger: pl.isTagger,
+            immuneUntil: until,
+            isImmune: now < until
+        };
+    }
+    return out;
+}
+
+function randomPlayerColor() {
+    return '#' + Math.floor(Math.random() * 16777215).toString(16).padStart(6, '0');
+}
+
+function sanitizePlayerName(raw) {
+    let name = typeof raw === 'string' ? raw.trim() : '';
+    if (!name) name = 'Player';
+    if (name.length > 24) name = name.slice(0, 24);
+    return name;
+}
+
 function resetGame() {
     maze = generateMaze();
     gameTimer = ROUND_SECONDS;
@@ -128,6 +176,7 @@ function resetGame() {
         players[id].x = pos.x;
         players[id].y = pos.y;
         players[id].isTagger = false;
+        players[id].immuneUntil = 0;
     }
     if (ids.length > 0) {
         const tagger = ids[Math.floor(Math.random() * ids.length)];
@@ -140,7 +189,7 @@ function resetGame() {
         maze,
         cellSize: CELL_SIZE,
         size: MAZE_SIZE,
-        players,
+        players: playersForClients(),
         timer: gameTimer
     });
 }
@@ -162,30 +211,35 @@ setInterval(() => {
 }, 1000);
 
 io.on('connection', (socket) => {
-    console.log('שחקן התחבר:', socket.id);
+    console.log('חיבור חדש:', socket.id);
 
-    const spawn = findValidSpawnPoint();
-    players[socket.id] = {
-        x: spawn.x,
-        y: spawn.y,
-        id: socket.id,
-        color: '#' + Math.floor(Math.random()*16777215).toString(16),
-        isTagger: false
-    };
+    socket.on('joinGame', (payload) => {
+        if (players[socket.id]) return;
 
-    socket.emit('mazeData', {
-        maze,
-        cellSize: CELL_SIZE,
-        size: MAZE_SIZE
+        const name = sanitizePlayerName(payload && payload.name);
+        const spawn = findValidSpawnPoint();
+        players[socket.id] = {
+            x: spawn.x,
+            y: spawn.y,
+            id: socket.id,
+            name,
+            color: randomPlayerColor(),
+            isTagger: false,
+            immuneUntil: 0
+        };
+
+        if (Object.keys(players).length === 1) {
+            players[socket.id].isTagger = true;
+            taggerId = socket.id;
+        }
+
+        socket.emit('mazeData', {
+            maze,
+            cellSize: CELL_SIZE,
+            size: MAZE_SIZE
+        });
+        io.emit('currentPlayers', playersForClients());
     });
-
-    // אם זה השחקן הראשון, הוא התופס
-    if (Object.keys(players).length === 1) {
-        players[socket.id].isTagger = true;
-        taggerId = socket.id;
-    }
-
-    io.emit('currentPlayers', players);
 
     // עדכון תנועה
     socket.on('playerMovement', (movementData) => {
@@ -202,8 +256,8 @@ io.on('connection', (socket) => {
             players[socket.id].x = nx;
             players[socket.id].y = ny;
 
-            // בדיקת התנגשות (תפיסה)
-            if (players[socket.id].isTagger) {
+            // בדיקת התנגשות (תפיסה) — תופס חסין לאחר הפיכה לתופס (מונע לולאת תג מיידית)
+            if (players[socket.id].isTagger && Date.now() > (players[socket.id].immuneUntil ?? 0)) {
                 for (let id in players) {
                     if (id !== socket.id) {
                         let p = players[id];
@@ -211,17 +265,19 @@ io.on('connection', (socket) => {
                         if (dist < 30) { // מרחק נגיעה
                             players[socket.id].isTagger = false;
                             players[id].isTagger = true;
+                            players[id].immuneUntil = Date.now() + TAG_IMMUNITY_MS;
                             taggerId = id;
-                            io.emit('currentPlayers', players);
+                            io.emit('currentPlayers', playersForClients());
                         }
                     }
                 }
             }
-            socket.broadcast.emit('playerMoved', players[socket.id]);
+            socket.broadcast.emit('playerMoved', playerPayload(players[socket.id]));
         }
     });
 
     socket.on('disconnect', () => {
+        if (!players[socket.id]) return;
         const wasTagger = taggerId === socket.id;
         delete players[socket.id];
         io.emit('playerDisconnected', socket.id);
@@ -231,8 +287,9 @@ io.on('connection', (socket) => {
                 for (const id of ids) players[id].isTagger = false;
                 const next = ids[Math.floor(Math.random() * ids.length)];
                 players[next].isTagger = true;
+                players[next].immuneUntil = 0;
                 taggerId = next;
-                io.emit('currentPlayers', players);
+                io.emit('currentPlayers', playersForClients());
             } else {
                 taggerId = null;
             }

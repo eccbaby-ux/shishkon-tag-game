@@ -3,21 +3,131 @@
 <head>
     <title>מבוך תופסת</title>
     <style>
-        body { margin: 0; overflow: hidden; background: #222; color: white; font-family: sans-serif; }
+        body { margin: 0; overflow: hidden; background: #222; color: white; font-family: system-ui, sans-serif; }
         canvas {
             display: block;
             background: #333;
             touch-action: none;
         }
-        #ui { position: absolute; top: 10; left: 10; pointer-events: none; z-index: 5; }
+        #loginOverlay {
+            position: fixed;
+            inset: 0;
+            z-index: 200;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: rgba(12, 14, 20, 0.92);
+        }
+        #loginOverlay.hidden { display: none; }
+        .login-panel {
+            width: min(92vw, 360px);
+            padding: 28px 24px;
+            border-radius: 14px;
+            background: #2a2d38;
+            box-shadow: 0 12px 40px rgba(0,0,0,0.45);
+            text-align: center;
+        }
+        .login-panel h2 { margin: 0 0 18px; font-size: 1.25rem; font-weight: 600; }
+        .login-panel label { display: block; text-align: right; margin-bottom: 6px; font-size: 0.85rem; opacity: 0.9; }
+        .login-panel input {
+            width: 100%;
+            box-sizing: border-box;
+            padding: 12px 14px;
+            border-radius: 8px;
+            border: 1px solid #444;
+            background: #1e2028;
+            color: #fff;
+            font-size: 1rem;
+            margin-bottom: 16px;
+        }
+        .login-panel input:focus { outline: 2px solid #5b7fd1; border-color: transparent; }
+        .login-panel button {
+            width: 100%;
+            padding: 12px;
+            border: none;
+            border-radius: 8px;
+            font-size: 1rem;
+            font-weight: 600;
+            cursor: pointer;
+            background: linear-gradient(180deg, #5b7fd1, #4568b8);
+            color: #fff;
+        }
+        .login-panel button:hover { filter: brightness(1.06); }
+        .login-panel .login-hint { margin-top: 10px; font-size: 0.75rem; opacity: 0.65; }
+        #gameScreen {
+            position: fixed;
+            inset: 0;
+            z-index: 1;
+        }
+        #gameScreen.game-hidden {
+            visibility: hidden;
+            pointer-events: none;
+        }
+        #ui { position: absolute; top: 10px; left: 10px; pointer-events: none; z-index: 5; }
+        #leaderboard {
+            position: absolute;
+            top: 44px;
+            right: 12px;
+            z-index: 6;
+            pointer-events: none;
+            max-width: min(200px, 46vw);
+            text-align: right;
+        }
+        #leaderboard .lb-title {
+            font-size: 0.7rem;
+            text-transform: uppercase;
+            letter-spacing: 0.06em;
+            opacity: 0.75;
+            margin-bottom: 6px;
+        }
+        #leaderboardList { list-style: none; margin: 0; padding: 0; }
+        .lb-row {
+            display: flex;
+            align-items: center;
+            justify-content: flex-end;
+            gap: 8px;
+            margin-bottom: 4px;
+            font-size: 0.82rem;
+            line-height: 1.2;
+        }
+        .lb-dot {
+            flex-shrink: 0;
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            border: 1px solid rgba(255,255,255,0.25);
+            box-sizing: border-box;
+        }
+        .lb-name {
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            max-width: 140px;
+        }
     </style>
 </head>
 <body>
-    <div id="ui">
-        <h1 id="timer">1:00</h1>
-        <p id="status">חפש מישהו לתפוס!</p>
+    <div id="loginOverlay">
+        <div class="login-panel">
+            <h2>מבוך תופסת</h2>
+            <label for="playerNameInput">שם שחקן</label>
+            <input type="text" id="playerNameInput" maxlength="24" placeholder="הזן שם" autocomplete="username" />
+            <button type="button" id="playBtn">שחק</button>
+            <p class="login-hint">נדרש שם לפני הכניסה למשחק</p>
+        </div>
     </div>
-    <canvas id="gameCanvas"></canvas>
+
+    <div id="gameScreen" class="game-hidden">
+        <div id="ui">
+            <h1 id="timer">1:00</h1>
+            <p id="status">חפש מישהו לתפוס!</p>
+        </div>
+        <div id="leaderboard" aria-label="שחקנים">
+            <div class="lb-title">שחקנים</div>
+            <ul id="leaderboardList"></ul>
+        </div>
+        <canvas id="gameCanvas"></canvas>
+    </div>
 
     <script src="/socket.io/socket.io.js"></script>
     <script>
@@ -25,6 +135,59 @@
         const canvas = document.getElementById('gameCanvas');
         const ctx = canvas.getContext('2d');
         const timerEl = document.getElementById('timer');
+        const loginOverlay = document.getElementById('loginOverlay');
+        const gameScreen = document.getElementById('gameScreen');
+        const playBtn = document.getElementById('playBtn');
+        const nameInput = document.getElementById('playerNameInput');
+        const leaderboardList = document.getElementById('leaderboardList');
+
+        let hasJoined = false;
+
+        function renderLeaderboard() {
+            if (!hasJoined) return;
+            leaderboardList.innerHTML = '';
+            const entries = Object.keys(players).map((id) => ({ id, ...players[id] }));
+            entries.sort((a, b) => {
+                if (!!a.isTagger !== !!b.isTagger) return a.isTagger ? -1 : 1;
+                return (a.name || '').localeCompare(b.name || '', undefined, { sensitivity: 'base' });
+            });
+            for (const p of entries) {
+                const li = document.createElement('li');
+                li.className = 'lb-row';
+                const dot = document.createElement('span');
+                dot.className = 'lb-dot';
+                dot.style.backgroundColor = p.color || '#888888';
+                dot.setAttribute('aria-hidden', 'true');
+                const nameEl = document.createElement('span');
+                nameEl.className = 'lb-name';
+                nameEl.textContent = p.name || 'Player';
+                li.appendChild(dot);
+                li.appendChild(nameEl);
+                leaderboardList.appendChild(li);
+            }
+        }
+
+        function enterGame() {
+            const trimmed = nameInput.value.trim();
+            if (!trimmed) {
+                nameInput.focus();
+                return;
+            }
+            socket.emit('joinGame', { name: trimmed.slice(0, 24) });
+            hasJoined = true;
+            loginOverlay.classList.add('hidden');
+            gameScreen.classList.remove('game-hidden');
+            resizeCanvas();
+        }
+
+        playBtn.addEventListener('click', () => enterGame());
+        nameInput.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                enterGame();
+            }
+        });
+        nameInput.focus();
 
         const MAZE_BG = '#333';
         const WALL_COLOR = '#252525';
@@ -139,12 +302,12 @@
             return false;
         }
         socket.on('positionCorrection', (pos) => {
-            if (players[socket.id]) {
-                players[socket.id].x = pos.x;
-                players[socket.id].y = pos.y;
-            }
+            if (!hasJoined || !players[socket.id]) return;
+            players[socket.id].x = pos.x;
+            players[socket.id].y = pos.y;
         });
         socket.on('currentPlayers', (serverPlayers) => {
+            if (!hasJoined) return;
             players = serverPlayers;
             pruneRenderPosition();
             for (const id in players) {
@@ -152,8 +315,10 @@
                 const p = players[id];
                 if (!renderPosition[id]) renderPosition[id] = { x: p.x, y: p.y };
             }
+            renderLeaderboard();
         });
         socket.on('gameReset', (data) => {
+            if (!hasJoined) return;
             maze = data.maze;
             cellSize = data.cellSize;
             players = data.players;
@@ -164,8 +329,13 @@
                 renderPosition[id] = { x: p.x, y: p.y };
             }
             timerEl.innerText = formatSecondsAsMMSS(data.timer);
+            renderLeaderboard();
         });
-        socket.on('playerMoved', (p) => { players[p.id] = p; });
+        socket.on('playerMoved', (p) => {
+            if (!hasJoined) return;
+            const prev = players[p.id] || {};
+            players[p.id] = { ...prev, ...p };
+        });
         function formatSecondsAsMMSS(totalSeconds) {
             const sec = Math.max(0, Math.floor(Number(totalSeconds) || 0));
             const m = Math.floor(sec / 60);
@@ -174,10 +344,13 @@
         }
         socket.on('timerUpdate', (t) => { timerEl.innerText = formatSecondsAsMMSS(t); });
         socket.on('playerDisconnected', (id) => {
+            if (!hasJoined) return;
             delete players[id];
             delete renderPosition[id];
+            renderLeaderboard();
         });
         socket.on('gameOver', (loserId) => {
+            if (!hasJoined) return;
             alert(loserId === socket.id ? "הפסדת! היית התופס." : "ניצחת! ברחת בזמן.");
         });
 
@@ -446,12 +619,20 @@
                 let p = players[id];
                 if (!p || typeof p.x !== 'number' || typeof p.y !== 'number') continue;
                 const { x: rx, y: ry } = getDrawPositionForPlayer(id, p);
+                const immuneUntil = p.immuneUntil ?? 0;
+                const isImmune = Date.now() < immuneUntil;
+                const taggerInGrace = p.isTagger && isImmune;
+                ctx.save();
+                if (taggerInGrace) {
+                    ctx.globalAlpha = Math.floor(Date.now() / 200) % 2 === 0 ? 0.35 : 0.9;
+                }
                 ctx.fillStyle = p.isTagger ? 'red' : p.color;
                 ctx.fillRect(rx, ry, PLAYER_W, PLAYER_H);
                 if (p.isTagger) {
                     ctx.strokeStyle = 'white';
                     ctx.strokeRect(rx - 2, ry - 2, PLAYER_W + 4, PLAYER_H + 4);
                 }
+                ctx.restore();
             }
 
             ctx.restore();
