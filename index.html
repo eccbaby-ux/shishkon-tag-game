@@ -1,6 +1,8 @@
 <!DOCTYPE html>
 <html>
 <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
     <title>מבוך תופסת</title>
     <style>
         body { margin: 0; overflow: hidden; background: #222; color: white; font-family: system-ui, sans-serif; }
@@ -63,15 +65,24 @@
             visibility: hidden;
             pointer-events: none;
         }
-        #ui { position: absolute; top: 10px; left: 10px; pointer-events: none; z-index: 5; }
+        #ui {
+            position: absolute;
+            top: calc(env(safe-area-inset-top, 0px) + 2.5%);
+            left: calc(env(safe-area-inset-left, 0px) + 2.5%);
+            z-index: 100;
+            pointer-events: none;
+            max-width: min(55vw, 16rem);
+            text-shadow: 0 1px 3px rgba(0,0,0,0.85);
+        }
         #leaderboard {
             position: absolute;
-            top: 44px;
-            right: 12px;
-            z-index: 6;
+            top: calc(env(safe-area-inset-top, 0px) + 6%);
+            right: calc(env(safe-area-inset-right, 0px) + 2.5%);
+            z-index: 100;
             pointer-events: none;
-            max-width: min(200px, 46vw);
+            max-width: min(42vw, 11rem);
             text-align: right;
+            text-shadow: 0 1px 3px rgba(0,0,0,0.85);
         }
         #leaderboard .lb-title {
             font-size: 0.7rem;
